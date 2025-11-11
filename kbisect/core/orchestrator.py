@@ -322,6 +322,8 @@ class BisectMaster:
 
         # Resolve test script paths for each host and store local paths for transfer
         self._local_test_scripts = {}  # Store mapping of host_id -> local_script_path for transfer
+        # Console collector (created per boot cycle)
+        self.active_console_collector: Optional["ConsoleCollector"] = None  # noqa: UP037
         for host_manager in self.host_managers:
             test_script = host_manager.config.test_script
             if test_script:
