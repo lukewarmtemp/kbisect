@@ -401,28 +401,77 @@ build_kernel() {
     sed -i "s/^EXTRAVERSION =.*/EXTRAVERSION = -$label/" Makefile
 
     # Copy base kernel config if specified
-    if [ -n "$kernel_config" ]; then
-        if [ "$kernel_config" = "RUNNING" ]; then
-            local running_config="/boot/config-$(uname -r)"
-            if [ -f "$running_config" ]; then
-                echo "Using running kernel config: $running_config" >&2
-                cp "$running_config" .config
-            else
-                echo "Warning: Running kernel config not found: $running_config" >&2
-            fi
-        elif [ -f "$kernel_config" ]; then
-            echo "Using kernel config: $kernel_config" >&2
-            cp "$kernel_config" .config
-        else
-            echo "Warning: Kernel config file not found: $kernel_config" >&2
-        fi
+    # if [ -n "$kernel_config" ]; then
+    #     if [ "$kernel_config" = "RUNNING" ]; then
+    #         local running_config="/boot/config-$(uname -r)"
+    #         if [ -f "$running_config" ]; then
+    #             echo "Using running kernel config: $running_config" >&2
+    #             cp "$running_config" .config
+    #         else
+    #             echo "Warning: Running kernel config not found: $running_config" >&2
+    #         fi
+    #     elif [ -f "$kernel_config" ]; then
+    #         echo "Using kernel config: $kernel_config" >&2
+    #         cp "$kernel_config" .config
+    #     else
+    #         echo "Warning: Kernel config file not found: $kernel_config" >&2
+    #     fi
+    # fi
+
+    # ---------------------------
+    # 1. Extract running config
+    # ---------------------------
+    echo "[+] Extracting currently running kernel config"
+
+    if [[ -f /proc/config.gz ]]; then
+        zcat /proc/config.gz > .config
+    elif [[ -f /boot/config-$(uname -r) ]]; then
+        cp /boot/config-$(uname -r) .config
+    else
+        echo "[-] Could not find running kernel config"
+        exit 1
     fi
 
+    # ---------------------------
+    # 2. Sync config with source tree
+    # ---------------------------
+    echo "[+] Validating config against this commit's Kconfig"
+
+    # This automatically:
+    #  - adds new symbols with Kconfig defaults
+    #  - removes deleted symbols
+    #  - resolves renamed ones if Kconfig provides migration
+    #  - prevents stale options from corrupting init
+    yes "" | make olddefconfig
+
+    # ---------------------------
+    # 3. Optional: Report dropped or invalid symbols
+    # ---------------------------
+    echo "[+] Detecting dropped / invalid symbols"
+    make listnewconfig || true   # lists new settings requiring attention
+    make oldnoconfig   || true   # lists removed symbols
+
+    echo "[+] Ensuring critical ARM64 platform options stay enabled"
+    # These MUST be enabled or you can get early boot/rootfs failures
+    scripts/config --enable CONFIG_EFI
+    scripts/config --enable CONFIG_EFI_STUB
+    scripts/config --enable CONFIG_EFI_GENERIC_STUB
+    scripts/config --enable CONFIG_BLK_DEV_INITRD
+    scripts/config --enable CONFIG_ARM64_VA_BITS_48
+    scripts/config --enable CONFIG_IKCONFIG
+    scripts/config --enable CONFIG_IKCONFIG_PROC
+    scripts/config --enable CONFIG_ARM_SMMU
+    scripts/config --enable CONFIG_ARM_SMMU_V3
+    scripts/config --module CONFIG_NVME_CORE
+    scripts/config --module CONFIG_NVME
+    scripts/config --module CONFIG_SCSI
+    scripts/config --module CONFIG_BLK_DEV_SD
+
     # Build kernel (olddefconfig uses .config as base if it exists, handles new options)
-    make olddefconfig >&2 || {
-        git restore Makefile
-        return 1
-    }
+    # make olddefconfig >&2 || {
+    #     git restore Makefile
+    #     return 1
+    # }
 
     make -j$(nproc) >&2 || {
         git restore Makefile
@@ -439,6 +488,17 @@ build_kernel() {
         git restore Makefile
         return 1
     }
+
+
+    # ---------------------------
+    # 6. Rebuild initramfs for the new kernel
+    # ---------------------------
+    KVER=$(make kernelrelease)
+    echo "[+] Rebuilding initramfs for ${KVER}"
+    sudo dracut -f /boot/initramfs-"${KVER}".img "${KVER}"
+
+    sync
+    echo "[+] Done. Reboot into ${KVER} safely."
 
     # Update GRUB
     if command -v grub2-mkconfig &> /dev/null; then
