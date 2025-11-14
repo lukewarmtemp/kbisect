@@ -157,7 +157,7 @@ class SlaveDeployer:
         logger.info(f"Checking SSH connectivity to {self.slave_host}...")
 
         try:
-            ret, stdout, stderr = self._ssh_command("echo test", timeout=300)
+            ret, stdout, stderr = self._ssh_command("echo test", timeout=self.connect_timeout)
         except SSHError:
             logger.error("✗ SSH connectivity failed")
             return False
