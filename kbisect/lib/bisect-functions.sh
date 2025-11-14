@@ -400,41 +400,42 @@ build_kernel() {
     cp Makefile Makefile.bisect-backup
     sed -i "s/^EXTRAVERSION =.*/EXTRAVERSION = -$label/" Makefile
 
-    # Copy base kernel config if specified
-    # if [ -n "$kernel_config" ]; then
-    #     if [ "$kernel_config" = "RUNNING" ]; then
-    #         local running_config="/boot/config-$(uname -r)"
-    #         if [ -f "$running_config" ]; then
-    #             echo "Using running kernel config: $running_config" >&2
-    #             cp "$running_config" .config
-    #         else
-    #             echo "Warning: Running kernel config not found: $running_config" >&2
-    #         fi
-    #     elif [ -f "$kernel_config" ]; then
-    #         echo "Using kernel config: $kernel_config" >&2
-    #         cp "$kernel_config" .config
-    #     else
-    #         echo "Warning: Kernel config file not found: $kernel_config" >&2
-    #     fi
-    # fi
+    Copy base kernel config if specified
+    if [ -n "$kernel_config" ]; then
+        if [ "$kernel_config" = "RUNNING" ]; then
+            local running_config="/boot/config-$(uname -r)"
+            if [ -f "$running_config" ]; then
+                echo "Using running kernel config: $running_config" >&2
+                cp "$running_config" .config
+            else
+                echo "Warning: Running kernel config not found: $running_config" >&2
+            fi
+        elif [ -f "$kernel_config" ]; then
+            echo "Using kernel config: $kernel_config" >&2
+            cp "$kernel_config" .config
+        else
+            echo "Warning: Kernel config file not found: $kernel_config" >&2
+        fi
+    fi
 
     # ---------------------------
     # 1. Extract running config
     # ---------------------------
-    echo "[+] Extracting currently running kernel config"
-
-    if [[ -f /proc/config.gz ]]; then
-        zcat /proc/config.gz > .config
-    elif [[ -f /boot/config-$(uname -r) ]]; then
-        cp /boot/config-$(uname -r) .config
-    else
-        echo "[-] Could not find running kernel config"
-        exit 1
-    fi
-
-    # ---------------------------
+    # echo "[+] Using running kernel config as base"
+    # if [[ -f /proc/config.gz ]]; then
+    #     zcat /proc/config.gz > .config
+    # elif [[ -f /boot/config-$(uname -r) ]]; then
+    #     cp /boot/config-$(uname -r) .config
+    # else
+    #     echo "ERROR: cannot find running kernel config (/proc/config.gz or /boot/config-$(uname -r))" >&2
+    #     exit 1
+    # fi
+    # # ---------------------------
     # 2. Sync config with source tree
     # ---------------------------
+
+    perl -pi -e 's/=m/=y/' .config
+
     echo "[+] Validating config against this commit's Kconfig"
 
     # This automatically:
@@ -442,30 +443,31 @@ build_kernel() {
     #  - removes deleted symbols
     #  - resolves renamed ones if Kconfig provides migration
     #  - prevents stale options from corrupting init
-    yes "" | make olddefconfig
+    yes "" | make ARCH=arm64 oldconfig
 
     # ---------------------------
     # 3. Optional: Report dropped or invalid symbols
     # ---------------------------
-    echo "[+] Detecting dropped / invalid symbols"
-    make listnewconfig || true   # lists new settings requiring attention
-    make oldnoconfig   || true   # lists removed symbols
+    # echo "[+] Detecting dropped / invalid symbols"
+    # make listnewconfig || true   # lists new settings requiring attention
+    # make oldnoconfig   || true   # lists removed symbols
 
-    echo "[+] Ensuring critical ARM64 platform options stay enabled"
-    # These MUST be enabled or you can get early boot/rootfs failures
-    scripts/config --enable CONFIG_EFI
-    scripts/config --enable CONFIG_EFI_STUB
-    scripts/config --enable CONFIG_EFI_GENERIC_STUB
-    scripts/config --enable CONFIG_BLK_DEV_INITRD
-    scripts/config --enable CONFIG_ARM64_VA_BITS_48
-    scripts/config --enable CONFIG_IKCONFIG
-    scripts/config --enable CONFIG_IKCONFIG_PROC
-    scripts/config --enable CONFIG_ARM_SMMU
-    scripts/config --enable CONFIG_ARM_SMMU_V3
-    scripts/config --module CONFIG_NVME_CORE
-    scripts/config --module CONFIG_NVME
-    scripts/config --module CONFIG_SCSI
-    scripts/config --module CONFIG_BLK_DEV_SD
+    scripts/config --file .config --enable CONFIG_EFI || true
+    scripts/config --file .config --enable CONFIG_EFI_STUB || true
+    scripts/config --file .config --enable CONFIG_BLK_DEV_INITRD || true
+    scripts/config --file .config --enable CONFIG_ARM_SMMU || true
+    scripts/config --file .config --enable CONFIG_ARM_SMMU_V3 || true
+    scripts/config --file .config --enable CONFIG_IKCONFIG || true
+    scripts/config --file .config --enable CONFIG_IKCONFIG_PROC || true
+    # If your root is NVMe/SCSI, make sure they are present as builtin or modules:
+    scripts/config --file .config --enable CONFIG_BLK_DEV_LOOP || true
+    # prefer module for NVMe/SCSI in the initramfs if you rely on dracut to include them
+    scripts/config --file .config --module CONFIG_NVME_CORE || true
+    scripts/config --file .config --module CONFIG_NVME || true
+    scripts/config --file .config --module CONFIG_SCSI || true
+    scripts/config --file .config --module CONFIG_BLK_DEV_SD || true
+
+    yes "" | make ARCH=arm64 oldconfig
 
     # Build kernel (olddefconfig uses .config as base if it exists, handles new options)
     # make olddefconfig >&2 || {
@@ -473,18 +475,18 @@ build_kernel() {
     #     return 1
     # }
 
-    make -j$(nproc) >&2 || {
+    make -j$(nproc) ARCH=arm64 >&2 || {
         git restore Makefile
         return 1
     }
 
     # Install
-    make modules_install >&2 || {
+    make modules_install ARCH=arm64 >&2 || {
         git restore Makefile
         return 1
     }
 
-    make install >&2 || {
+    make install ARCH=arm64>&2 || {
         git restore Makefile
         return 1
     }
@@ -493,12 +495,15 @@ build_kernel() {
     # ---------------------------
     # 6. Rebuild initramfs for the new kernel
     # ---------------------------
-    KVER=$(make kernelrelease)
-    echo "[+] Rebuilding initramfs for ${KVER}"
-    sudo dracut -f /boot/initramfs-"${KVER}".img "${KVER}"
+    KVER=$(make -s ARCH=arm64 kernelrelease)
+    echo "[+] Rebuilding initramfs (force include nvme, scsi) for $KVER"
+    sudo dracut --force --kver "$KVER" --add "lvm" --add "ssh"  \
+        --include /etc/modprobe.d /etc/modprobe.d 2>/dev/null || {
+        # fallback to plain rebuild if --add fails
+        sudo dracut -f /boot/initramfs-"${KVER}".img "${KVER}"
+    }
 
     sync
-    echo "[+] Done. Reboot into ${KVER} safely."
 
     # Update GRUB
     if command -v grub2-mkconfig &> /dev/null; then
