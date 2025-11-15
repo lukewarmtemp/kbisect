@@ -475,7 +475,7 @@ build_kernel() {
     #     return 1
     # }
 
-    make -j$(nproc) ARCH=arm64 >&2 || {
+    make -j$(nproc) ARCH=arm64 KCFLAGS="-Wno-error=unused-variable -Wno-error=unused-but-set-variable -Wno-error=unused-function" >&2 || {
         git restore Makefile
         return 1
     }
