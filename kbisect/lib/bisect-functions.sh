@@ -400,6 +400,15 @@ build_kernel() {
     cp Makefile Makefile.bisect-backup
     sed -i "s/^EXTRAVERSION =.*/EXTRAVERSION = -$label/" Makefile
 
+    # Fix unused variable issue in vgic-v4.c before compilation   
+    if [ -f arch/arm64/kvm/vgic/vgic-v4.c ]; then
+        # Fix all occurrences of 'int ret = 0;' in the entire file
+        sed -i 's/int ret = 0;/int ret __attribute__((unused)) = 0;/g' arch/arm64/kvm/vgic/vgic-v4.c
+        sync
+    else
+        echo "ERROR: vgic-v4.c file not found!" >&2
+    fi
+
     Copy base kernel config if specified
     if [ -n "$kernel_config" ]; then
         if [ "$kernel_config" = "RUNNING" ]; then
