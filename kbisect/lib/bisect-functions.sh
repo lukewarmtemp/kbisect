@@ -443,7 +443,7 @@ build_kernel() {
     # 2. Sync config with source tree
     # ---------------------------
 
-    perl -pi -e 's/=m/=y/' .config
+    # perl -pi -e 's/=m/=y/' .config
 
     echo "[+] Validating config against this commit's Kconfig"
 
