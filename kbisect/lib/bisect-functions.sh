@@ -594,9 +594,15 @@ build_kernel() {
         return 1
     fi
 
-    # Restore Makefile
+    # Restore Makefile and any modified source files
     git restore Makefile
     rm -f Makefile.bisect-backup
+    
+    # Restore vgic-v4.c to clean state (undo our compilation fix)
+    if [ -f arch/arm64/kvm/vgic/vgic-v4.c ]; then
+        git checkout arch/arm64/kvm/vgic/vgic-v4.c
+        echo "✓ Restored vgic-v4.c to original state" >&2
+    fi
 
     # Output kernel version (for master to capture)
     echo "$kernel_version"
