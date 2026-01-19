@@ -1,337 +1,233 @@
-# Automated Kernel Bisection Tool
+# kbisect - Automated Kernel Bisection Tool
 
-**Automatically find the exact kernel commit that introduced a bug or performance regression.**
+Automatically find the exact kernel commit that introduced a bug. The tool handles building, rebooting, testing, and failure recovery without manual intervention.
 
-This tool automates the entire kernel bisection process - building kernels, rebooting systems, running tests, and handling failures - so you can go from "something broke between v6.1 and v6.6" to "this specific commit caused the problem" without manual intervention.
+## Prerequisites
 
-## Table of Contents
+**Control Machine** (where you run kbisect):
+- Python 3.8+
+- SSH access to test host(s) (passwordless, as root)
+- Power control tools (optional but recommended):
+  - `ipmitool` for IPMI-based power control, OR
+  - `bkr` (Beaker client) for lab automation systems, OR
+  - Neither (falls back to SSH reboot)
 
-- [What Does This Tool Do?](#what-does-this-tool-do)
-- [Quick Start](#quick-start)
-- [How It Works](#how-it-works)
-- [Installation](#installation)
-- [Usage Guide](#usage-guide)
-  - [Basic Bisection](#basic-bisection)
-  - [Using a Custom Kernel Config](#using-a-custom-kernel-config)
-  - [Running Custom Tests](#running-custom-tests)
-  - [Monitoring Progress](#monitoring-progress)
-- [Configuration](#configuration)
-- [Advanced Features](#advanced-features)
-- [Troubleshooting](#troubleshooting)
-- [Safety Features](#safety-features)
-- [Architecture](#architecture)
-
----
-
-## What Does This Tool Do?
-
-Given a "good" kernel version (works) and a "bad" kernel version (broken), this tool automatically:
-
-1. ✅ **Deploys** itself to a test machine (slave)
-2. ✅ **Protects** your production kernel from deletion
-3. ✅ **Builds** kernel commits via git bisect
-4. ✅ **Captures** build logs and boot console output
-5. ✅ **Reboots** the test machine into new kernels
-6. ✅ **Tests** each kernel (boot test or custom scripts)
-7. ✅ **Recovers** from kernel panics and boot failures via IPMI (with retry logic)
-8. ✅ **Manages** disk space automatically
-9. ✅ **Reports** the exact commit that introduced the bug
-
-**No manual intervention required** - it handles reboots, failures, and cleanup automatically.
-
----
-
-## Quick Start
-
-**Prerequisites:**
-- Master machine (Linux, with Python 3.8+)
-- Slave/test machine (where kernels will be built and tested)
-- SSH access from master to slave (root, passwordless)
-- IPMI access to slave (optional but recommended for recovery)
-- Conserver access (optional, for console log collection during boot)
-- Kernel source on slave: `/root/kernel` (git clone of linux repo)
-
-**5-Minute Setup:**
-
-```bash
-# 1. On master: Install system dependencies
-# Required: python3, pip, ipmitool (for IPMI), git
-# Optional: conserver-client (for console log collection)
-sudo dnf install python3 python3-pip ipmitool git conserver-client  # RHEL/Fedora
-# or for Debian/Ubuntu:
-# sudo apt-get install python3 python3-pip ipmitool git conserver-client
-
-# 2. Install kbisect directly from GitHub
-pip install git+https://github.com/janjurca/kbisect.git
-# or using pipx (recommended for CLI tools):
-# pipx install git+https://github.com/janjurca/kbisect.git
-# or user installation (no sudo):
-# pip install --user git+https://github.com/janjurca/kbisect.git
-
-# 3. Setup SSH keys (passwordless access to slave)
-ssh-keygen -t ed25519
-ssh-copy-id root@<slave-ip>
-
-# 4. On slave: Clone kernel source
-ssh root@<slave-ip>
-git clone https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git /root/kernel
-exit
-
-# 5. Create directory for this bisection case
-mkdir ~/bisect-boot-issue
-cd ~/bisect-boot-issue
-
-# 6. Create config for this bisection (copy from installed package)
-python3 -c "import kbisect; from pathlib import Path; import shutil; src = Path(kbisect.__file__).parent / 'config' / 'bisect.conf.example'; shutil.copy(src, 'bisect.yaml')"
-vim bisect.yaml
-# Edit: Set slave hostname, IPMI credentials
-
-# 7. Run bisection!
-kbisect init v6.1 v6.6    # Replace with your good/bad versions
-kbisect start
-# Creates: ./bisect.db (database)
-# Logs are printed to terminal (stdout/stderr)
-```
-
-That's it! The tool will now bisect automatically. Check progress with `kbisect status`.
-
----
-
-## How It Works
-
-```
-┌─────────────────┐         ┌──────────────────┐
-│  Master Machine │────SSH──┤  Slave Machine   │
-│                 │         │  (Test System)   │
-│  - Orchestrates │         │                  │
-│  - Makes        │         │  - Bash Library  │
-│  - Decisions    │         │  - Builds kernels│
-│  - Stores state │         │  - Boots kernels │
-│  - Calls        │         │  - Runs tests    │
-│    functions    │         │                  │
-└────────┬────────┘         └──────────────────┘
-         │                           ▲
-         │ IPMI (Power Control)      │
-         └───────────────────────────┘
-```
-
-**Workflow for each iteration:**
-
-1. **Master** tells slave to build kernel for commit X via SSH
-2. **Slave** builds kernel, installs it, sets as **one-time boot** (grub-reboot)
-3. **Master** stores compressed build log in database
-4. **Master** starts console log collection (if configured) - conserver or IPMI SOL
-5. **Master** reboots slave
-6. **Master** waits for slave to boot (monitors SSH connectivity)
-7. **Master** stops console collection and stores boot log in database
-8. **Master** verifies correct kernel booted (detects panics via kernel version check)
-9. **Master** captures kernel config file for later analysis
-10. **Master** collects system metadata (kernel version, modules, etc.)
-11. **Master** runs test script on slave (default: boot success test)
-12. **Master** marks commit as good/bad/skip in git bisect
-13. **Repeat** until exact commit found
-
-**Boot failure handling:**
-- If kernel panics or hangs → IPMI recovery if configured → Falls back to protected kernel
-- Boot test mode: non-bootable = BAD | Custom test mode: non-bootable = SKIP
-
-**All state stored in SQLite** - survives crashes, can resume later.
-
----
+**Test Host(s)** (where kernels are built and tested):
+- Linux system(s) where kernels will be built and tested
+- Kernel source at `/root/kernel` (auto-deployed or manual git clone)
+- Power management interface (optional but recommended):
+  - IPMI (best for reliability and recovery)
+  - Beaker lab system integration
+  - SSH access (minimum requirement)
+- **Multi-host support**: Configure multiple test hosts for parallel bisection (e.g., network testing with server/client roles)
 
 ## Installation
 
-### Master Machine
-
-The master machine runs the `kbisect` CLI tool and orchestrates the bisection.
-
-**1. Install system dependencies:**
+### 1. Install on Control Machine
 
 ```bash
-# RHEL/Fedora/Rocky
-# Required: python3, pip, ipmitool (for IPMI), git
-# Optional: conserver-client (for console log collection)
-sudo dnf install python3 python3-pip ipmitool git conserver-client
+# Install system dependencies
+sudo dnf install python3 python3-pip ipmitool git  # RHEL/Fedora
+# OR
+sudo apt install python3 python3-pip ipmitool git  # Debian/Ubuntu
 
-# Debian/Ubuntu
-sudo apt-get install python3 python3-pip ipmitool git conserver-client
+# Optional: Install Beaker client (if using Beaker lab automation)
+sudo dnf install beaker-client  # RHEL/Fedora
 
-# Note: conserver-client is optional but recommended for console log collection
-# If not available, IPMI SOL will be used as fallback (requires IPMI configured)
-
-# Verify Python 3.8+
-python3 --version
-```
-
-**2. Install kbisect:**
-
-Choose the installation method based on your use case:
-
-```bash
-# Option A: Install from GitHub (recommended for end users)
+# Install kbisect
 pip install git+https://github.com/janjurca/kbisect.git
-
-# Option B: Clone and install in development mode (for contributors)
-# This creates a symlink, so code changes are immediately active
-git clone https://github.com/janjurca/kbisect.git
-cd kbisect
-pip install -e .
-
-# Option C: Development installation with dev tools (ruff, mypy, pytest)
-git clone https://github.com/janjurca/kbisect.git
-cd kbisect
-pip install -e ".[dev]"
 
 # Verify installation
 kbisect --help
 ```
 
-**Note:** If you get a "externally managed environment" error, use one of these approaches:
-```bash
-# Approach 1: Use pipx (recommended for CLI tools)
-pipx install git+https://github.com/janjurca/kbisect.git
-
-# Approach 2: Use a virtual environment
-python3 -m venv venv
-source venv/bin/activate
-pip install git+https://github.com/janjurca/kbisect.git
-
-# Approach 3: User installation (no sudo needed)
-pip install --user git+https://github.com/janjurca/kbisect.git
-```
-
-**3. Setup SSH keys:**
+### 2. Setup SSH Keys
 
 ```bash
-# Generate SSH key if you don't have one
-ssh-keygen -t ed25519 -f ~/.ssh/id_ed25519
+# Generate SSH key (if you don't have one)
+ssh-keygen -t ed25519
 
-# Copy to slave (enables passwordless SSH)
-ssh-copy-id root@<slave-ip>
+# Copy to test host(s) - enables passwordless SSH
+ssh-copy-id root@<test-host-ip>
+
+# For multiple hosts, repeat for each
+ssh-copy-id root@<test-host-2-ip>
 
 # Test connection
-ssh root@<slave-ip> 'echo "SSH works"'
+ssh root@<test-host-ip> 'echo "SSH works"'
 ```
 
-**4. Configuration is per-directory:**
 
-Each bisection case gets its own directory with its own config file:
+## Configuration
+
+Each bisection case gets its own directory with its own config file.
 
 ```bash
-# Create directory for your bisection case
+# Create directory for your bisection
 mkdir ~/my-bisection
 cd ~/my-bisection
 
-# Copy and customize config from the installed package
-python3 -c "import kbisect; from pathlib import Path; import shutil; src = Path(kbisect.__file__).parent / 'config' / 'bisect.conf.example'; shutil.copy(src, 'bisect.yaml')"
-
-# Or manually copy from cloned repository (if you cloned for development)
-# cp ~/projects/kbisect/src/kbisect/config/bisect.conf.example ./bisect.yaml
+# Generate config file
+kbisect init-config
 
 # Edit the config
 vim bisect.yaml
 ```
 
-**Edit the config file** - minimum required settings:
+### Quick Start: Minimum Single-Host Configuration
+
+For a simple single-host setup, configure one test host in the `hosts` array:
 
 ```yaml
-slave:
-  hostname: 192.168.1.100        # YOUR SLAVE IP
-  ssh_user: root
-  kernel_path: /root/kernel
+# Simplest configuration for single host
+hosts:
+  - hostname: 192.168.1.100      # YOUR TEST HOST IP
+    ssh_user: root
+    kernel_path: /root/kernel
+    test_script: test.sh
 
-ipmi:
-  host: 192.168.1.101            # YOUR IPMI IP (optional)
-  username: admin
-  password: changeme
+    # Optional but recommended: IPMI power control
+    power_control_type: ipmi
+    ipmi_host: 192.168.1.101     # YOUR IPMI IP
+    ipmi_user: admin
+    ipmi_password: changeme
 ```
 
-### Slave Machine
+**Note**: Even for single-host setups, the `hosts` array is used. This provides consistency and easy expansion to multi-host later.
 
-**Only one requirement:** Kernel source must exist at `/root/kernel`
+### Multi-Host Configuration
 
-```bash
-# On slave machine
-ssh root@<slave-ip>
+For network testing or scenarios requiring multiple hosts (e.g., server/client pairs), configure multiple hosts with role-specific test scripts:
 
-# Clone kernel source
-git clone https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git /root/kernel
+```yaml
+# Multi-host example: Network performance testing
+hosts:
+  - hostname: server1.example.com
+    ssh_user: root
+    kernel_path: /root/kernel
+    bisect_path: /root/kernel-bisect/lib
+    test_script: test-server.sh      # Server role: runs iperf3 server
 
-# Or clone a specific tree
-git clone https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git /root/kernel
+    power_control_type: ipmi
+    ipmi_host: ipmi1.example.com
+    ipmi_user: admin
+    ipmi_password: secret1
 
-# That's it! Master will deploy everything else automatically.
+  - hostname: client1.example.com
+    ssh_user: root
+    kernel_path: /root/kernel
+    bisect_path: /root/kernel-bisect/lib
+    test_script: test-client.sh      # Client role: runs iperf3 client
+
+    power_control_type: beaker       # Different power control type
 ```
 
-**Optional:** Install kernel build dependencies:
+**How multi-host bisection works:**
+- All hosts build kernels **in parallel** (faster iteration)
+- All hosts reboot **in parallel** with their configured power controllers
+- All hosts run tests **in parallel** with role-specific test scripts
+- **Aggregation**: ALL hosts must pass for commit to be marked GOOD; if ANY host fails → BAD
 
-```bash
-# RHEL/Fedora/Rocky
-sudo dnf groupinstall "Development Tools"
-sudo dnf install ncurses-devel bc bison flex elfutils-libelf-devel openssl-devel
+### Power Control Options
 
-# Debian/Ubuntu
-sudo apt-get install build-essential libncurses-dev bc bison flex libelf-dev libssl-dev
+Each host can use different power control mechanisms. Choose based on your infrastructure:
+
+#### Option 1: IPMI (Recommended)
+Best for reliability, supports hard reset and recovery:
+
+```yaml
+hosts:
+  - hostname: 192.168.1.100
+    power_control_type: ipmi
+    ipmi_host: 192.168.1.101         # IPMI interface IP
+    ipmi_user: admin
+    ipmi_password: changeme
 ```
 
-**Everything else is automated** - when you run `kbisect init`, it will:
-- Deploy bash library to slave
-- Initialize kernel protection
-- Create required directories
-- Verify deployment
+**Test IPMI setup:**
+```bash
+kbisect check                         # Validates IPMI configuration
+kbisect ipmi status                   # Check power status
+```
 
----
+#### Option 2: Beaker Lab Automation
+For hosts managed by Beaker lab systems:
 
-## Usage Guide
+```yaml
+hosts:
+  - hostname: system.example.com      # FQDN as registered in Beaker
+    power_control_type: beaker
+    # No additional config needed - uses Kerberos auth
+```
 
-### Basic Bisection
+**Prerequisites:**
+- `bkr` command installed on control machine
+- Active Kerberos ticket: `kinit your-username@REALM`
+- Verify: `bkr whoami`
 
-**Scenario:** Something broke between kernel v6.1 (good) and v6.6 (bad).
+#### Option 3: SSH Fallback
+No external power control, uses SSH reboot command:
+
+```yaml
+hosts:
+  - hostname: 192.168.1.100
+    power_control_type: null          # or omit this field
+    # Falls back to SSH reboot command
+```
+
+**Limitations**: Cannot force power-off or hard reset (reboot only). Best for development or hosts without IPMI/Beaker.
+
+### Key Optional Settings
+
+```yaml
+# Automatic kernel repository deployment
+# If configured, kbisect will clone/copy the kernel repo to all test hosts
+kernel_repo:
+  source: https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git
+  branch: master  # Optional: specific branch to checkout
+
+# Global kernel config (applies to all hosts unless overridden)
+kernel_config:
+  config_file: /path/to/.config  # Path on control machine (auto-transferred)
+
+# Per-host kernel config override (in hosts array)
+hosts:
+  - hostname: 192.168.1.100
+    kernel_config_file: /path/to/host1-config  # Override for this host
+
+# Timeouts (apply to all hosts)
+timeouts:
+  boot: 300    # Seconds to wait for boot per host
+  build: 1800  # Seconds to wait for build per host (parallel builds)
+  test: 600    # Seconds to wait for test per host
+  ssh_connect: 15  # SSH connection timeout
+
+# Console log collection (per-host, requires conserver or IPMI)
+console_logs:
+  enabled: true
+  collector: "auto"  # Try conserver, fall back to IPMI SOL
+```
+
+**Note:** If `kernel_repo` is not configured, you must manually clone the kernel source to `/root/kernel` on each test host before running init.
+
+## Usage
+
+### Basic Bisection (Boot Test)
+
+Find which commit breaks kernel boot:
 
 ```bash
-# Initialize bisection (deploys to slave if needed)
+# Initialize bisection
 kbisect init v6.1 v6.6
 
 # Start automatic bisection
 kbisect start
-```
 
-**Execution model:**
-- `kbisect start` runs as a **foreground process** (not a daemon)
-- Blocks in your terminal until bisection completes or you press Ctrl+C
-- All progress saved to SQLite database - you can resume anytime with `kbisect start`
-- Real-time output shows build progress, test results, and iteration status
-
-The tool will now:
-- Build kernels automatically
-- Reboot slave for each test
-- Run **boot success test** (checks filesystem writable, SSH daemon running)
-- Mark commits as good/bad/skip based on test results
-- Continue until it finds the exact commit
-
-> **Note:** Without `--test-script`, the default test only checks if the kernel boots successfully. For specific bugs (network issues, performance, etc.), provide a custom test script.
-
-**Monitor progress:**
-
-```bash
-# Check current status (queries database, read-only)
+# Check progress (from another terminal)
 kbisect status
 
-# Shows:
-# - Session status (running/completed/halted)
-# - Good/bad commits and timestamps
-# - Total iterations and last 5 iterations with results
-# - First bad commit (if found)
-```
-
-**When complete:**
-
-```bash
-# Generate detailed report
+# When complete, view results
 kbisect report
-
-# Output saved to terminal (or save to file):
-kbisect report --output /tmp/bisect-report.txt
 ```
 
 The report will show the **first bad commit** - the exact commit that introduced the problem.
@@ -345,13 +241,13 @@ The report will show the **first bad commit** - the exact commit that introduced
 **Option 1: Use a specific config file**
 
 ```bash
-# Save your known-good config from slave to master
-scp root@<slave-ip>:/boot/config-$(uname -r) /tmp/my-config
+# Save your known-good config from test host to control machine
+scp root@<test-host-ip>:/boot/config-$(uname -r) /tmp/my-config
 
 # Configure it in bisect.yaml
 cat > bisect.yaml <<EOF
 kernel_config:
-  config_file: /tmp/my-config  # Path on master machine (will be transferred to slave)
+  config_file: /tmp/my-config  # Path on control machine (auto-transferred to hosts)
 EOF
 
 kbisect start
@@ -366,239 +262,406 @@ kernel_config:
 ```
 
 **How it works:**
-1. Config file is read from **master machine**
-2. File is automatically transferred to slave during initialization
-3. Base `.config` is copied to kernel source on slave
+1. Config file is read from **control machine**
+2. File is automatically transferred to all test hosts during initialization
+3. Base `.config` is copied to kernel source on each test host
 4. `make olddefconfig` runs (handles new/removed options automatically)
 5. New options get default values (non-interactive - no prompts!)
-6. Kernel builds with consistent config
+6. Kernel builds with consistent config across all hosts
 
 ### Running Custom Tests
 
 **Default test (no test script specified):**
 
-When you run `kbisect start` without `--test-script`, it performs a **boot success test**:
+### Custom Test Script
 
-1. Waits for systemd to finish booting (if systemctl available)
-2. **Check 1/2:** Filesystem is writable (`/tmp` access) ✅
-3. **Check 2/2:** SSH daemon is running ✅
-
-**Result:** Kernel is marked **GOOD** if at least 1 check passes, **BAD** if both checks fail.
-
-This default test is perfect for finding:
-- Boot failures and kernel panics
-- Critical system breakage
-- Basic boot regressions
-
-**For specific bugs/regressions,** use a custom test script:
+For specific bugs (network issues, performance regressions, etc.), provide a test script:
 
 ```bash
 #!/bin/bash
-# test-network-bug.sh
-# Test if network regression is present
+# test-network.sh
+# Exit 0 = kernel is GOOD, Exit 1 = kernel is BAD
 
-# Your test logic
 ping -c 5 8.8.8.8 > /dev/null 2>&1
 if [ $? -eq 0 ]; then
     echo "Network works"
-    exit 0  # GOOD kernel
+    exit 0  # GOOD
 else
     echo "Network broken"
-    exit 1  # BAD kernel
+    exit 1  # BAD
 fi
 ```
 
-**Usage:**
+Configure the test script in your bisect.yaml:
 
-```bash
-chmod +x test-network-bug.sh
-kbisect init v6.1 v6.6
-kbisect start --test-script /path/to/test-network-bug.sh
+```yaml
+test:
+  type: custom
+  script: ./test-network.sh  # Path to your test script
 ```
 
-**Test script requirements:**
-- Must be executable
-- Exit 0 = kernel is GOOD
-- Exit non-zero = kernel is BAD
-- Will be copied to slave and executed after boot
-
-**Important: Boot failure handling**
-
-When using a custom test script, boot failures are handled differently:
-- **Kernel panics/doesn't boot** → Automatically marked as **SKIP** ⊘
-  - Can't test your functionality if kernel doesn't boot
-  - Git bisect will pick a different commit to test
-- **Kernel boots successfully** → Your test script runs
-  - Exit 0 → GOOD ✓
-  - Exit non-zero → BAD ✗ (this is the regression you're looking for!)
-
-This ensures bisection finds the commit that **broke your specific functionality**, not just unbootable kernels.
-
-**Performance regression example:**
+Then run bisection:
 
 ```bash
+chmod +x test-network.sh
+kbisect init v6.1 v6.6
+kbisect start
+```
+
+**Note:** When using custom tests, kernels that fail to boot are automatically marked as SKIP (can't test functionality if kernel doesn't boot).
+
+### Advanced: Multi-Host Bisection
+
+For bugs that require multiple hosts (network issues, distributed systems, etc.), kbisect supports parallel bisection across multiple test hosts:
+
+**Example: Network Performance Regression**
+
+```yaml
+# bisect.yaml
+hosts:
+  - hostname: server1.example.com
+    test_script: test-server.sh      # Server role
+    power_control_type: ipmi
+    ipmi_host: ipmi1.example.com
+    ipmi_user: admin
+    ipmi_password: secret1
+
+  - hostname: client1.example.com
+    test_script: test-client.sh      # Client role
+    power_control_type: ipmi
+    ipmi_host: ipmi2.example.com
+    ipmi_user: admin
+    ipmi_password: secret2
+```
+
+**Test Scripts:**
+
+```bash
+# test-server.sh (on server host)
 #!/bin/bash
-# test-io-performance.sh
+# Start iperf3 server in background
+iperf3 -s -D
+sleep 2
+exit 0  # Server always returns GOOD
 
-# Run fio benchmark
-IOPS=$(fio --name=test --rw=randread --bs=4k --size=1G --numjobs=1 \
-           --ioengine=libaio --direct=1 --time_based --runtime=10 \
-           --output-format=json | jq '.jobs[0].read.iops')
+# test-client.sh (on client host)
+#!/bin/bash
+# Run iperf3 client against server
+THROUGHPUT=$(iperf3 -c server1.example.com -t 10 -J | jq '.end.sum_received.bits_per_second')
+THRESHOLD=8000000000  # 8 Gbps
 
-# Threshold: expecting at least 50000 IOPS
-if [ "$IOPS" -lt 50000 ]; then
-    echo "Performance regression: $IOPS IOPS"
+if [ "$THROUGHPUT" -lt "$THRESHOLD" ]; then
+    echo "Performance regression: ${THROUGHPUT}bps < ${THRESHOLD}bps"
     exit 1  # BAD
 else
-    echo "Performance OK: $IOPS IOPS"
+    echo "Performance OK: ${THROUGHPUT}bps"
     exit 0  # GOOD
 fi
 ```
 
-### Monitoring Progress
+**How it works:**
 
-**Note:** `kbisect start` shows real-time output in your terminal. These commands are useful for:
-- Checking status before/after bisection
-- Monitoring from a different terminal or SSH session
-- Verifying slave health before starting
+1. **Parallel Build**: All hosts build the kernel simultaneously
+2. **Parallel Reboot**: All hosts reboot with their configured power controllers
+3. **Parallel Tests**: Each host runs its role-specific test script
+4. **Aggregation**:
+   - ALL hosts PASS → Commit marked **GOOD**
+   - ANY host FAILS → Commit marked **BAD**
+   - ANY host SKIPS → Commit marked **SKIP**
 
-**Check bisection status:**
+**Sample Output:**
 
-```bash
-# Check status (before starting, after Ctrl+C, or from another terminal)
-kbisect status
+```
+=== Iteration 5: abc123def ===
+Building kernel on 2 hosts...
+  [server1.example.com] Build successful: 6.5.0-bisect-abc123d
+  [client1.example.com] Build successful: 6.5.0-bisect-abc123d
+✓ All hosts built successfully
 
-# This command:
-# - Queries the SQLite database (read-only, no slave connection)
-# - Shows session info: ID, status (running/completed/halted), commits, timestamps
-# - Shows total iteration count and LAST 5 iterations with results
-# - Displays first bad commit if found
-# - Safe to run anytime, does not modify state
+Rebooting 2 hosts...
+  [server1.example.com] Reboot successful
+  [client1.example.com] Reboot successful
+✓ All hosts rebooted
 
-# Example output:
-# === Bisection Status ===
-#
-# Session ID:   1
-# Status:       running
-# Good commit:  v6.1
-# Bad commit:   v6.6
-# Started:      2024-01-15 10:23:45
-#
-# Total iterations: 8
-#
-# Recent iterations:
-#   4. d4e5f6g | good    | 180s  | mm: add new feature X
-#   5. a1b2c3d | good    | 175s  | net: improve performance
-#   6. g7h8i9j | bad     | 190s  | fs: change buffer handling
-#   7. x9y8z7a | skip    | 45s   | driver: update (build failed)
-#   8. m5n6o7p | running | N/A   | sched: optimize task handling
+Running tests on 2 hosts...
+  [server1.example.com] Test PASSED
+  [client1.example.com] Test FAILED: Performance regression
+✗ Failed on: client1.example.com - marking commit BAD
 ```
 
-**Monitor slave health:**
+### Build-Only Mode
+
+Test kernel compilation without running a full bisection cycle. Useful for:
+- Pre-build validation before starting bisection
+- Testing custom kernel configs
+- CI/CD integration
+- Debugging build failures
+
+**Basic Usage:**
 
 ```bash
-# One-time health check (useful before starting bisection)
-kbisect monitor
+# Build a specific commit on all configured hosts
+kbisect build abc123def
 
-# Continuous monitoring from another terminal
-kbisect monitor --continuous --interval 5
+# Build with logs saved to database
+kbisect build v6.6 --save-logs
+
+# Build supports short or full commit SHAs, tags, or branch names
+kbisect build HEAD
+kbisect build v6.5.0
+kbisect build abc123def456789abc123def456789abc123def45
 ```
 
-**IPMI power control:**
+**What it does:**
+- ✓ Validates commit exists on all hosts
+- ✓ Builds kernel in parallel on all configured hosts
+- ✓ Applies configured kernel config (if any)
+- ✗ Does NOT install the kernel
+- ✗ Does NOT reboot hosts
+- ✗ Does NOT run tests
+- ✗ Does NOT require `kbisect init` first
+
+**View Build Logs:**
 
 ```bash
-# Check power state
-kbisect ipmi status
+# Build with saved logs
+kbisect build abc123def --save-logs
 
-# Manual power cycle (if needed)
+# List build logs
+kbisect logs list
+
+# View specific build log
+kbisect logs show <log-id>
+
+# View logs for a specific session
+kbisect logs list --session-id <session-id>
+```
+
+**Example: Testing Kernel Config**
+
+```yaml
+# bisect.yaml
+hosts:
+  - hostname: 192.168.1.100
+
+kernel_config:
+  config_file: /tmp/debug-config  # Custom config with DEBUG options
+```
+
+```bash
+# Test if kernel builds with debug config
+kbisect build v6.6 --save-logs
+
+# If successful, proceed with full bisection
+kbisect init v6.1 v6.6
+kbisect start
+```
+
+### Resume After Interruption
+
+State is saved in SQLite. Resume anytime with:
+
+```bash
+kbisect start
+```
+
+## How It Works
+
+### Single-Host Architecture
+
+```
+┌──────────────────┐                    ┌──────────────────┐
+│ Control Machine  │────────SSH─────────│   Test Host      │
+│                  │                    │                  │
+│  • Orchestrates  │                    │  • Builds kernel │
+│  • Makes         │                    │  • Boots kernel  │
+│    decisions     │                    │  • Runs tests    │
+│  • Stores state  │                    │                  │
+│    in SQLite     │                    │                  │
+└────────┬─────────┘                    └──────────────────┘
+         │                                       ▲
+         │    Power Control (IPMI/Beaker/SSH)   │
+         └───────────────────────────────────────┘
+```
+
+### Multi-Host Architecture
+
+```
+                    ┌─────────────────────┐
+                    │  Control Machine    │
+                    │  • Orchestrates     │
+                    │  • Parallel builds  │
+                    │  • Aggregates tests │
+                    │  • Stores state     │
+                    └──────────┬──────────┘
+                               │
+         ┌─────────────────────┼─────────────────────┐
+         │ SSH                 │ SSH                 │ SSH
+         ▼                     ▼                     ▼
+  ┌──────────────┐      ┌──────────────┐     ┌──────────────┐
+  │  Test Host 1 │      │  Test Host 2 │     │  Test Host N │
+  │              │      │              │     │              │
+  │ • Build      │      │ • Build      │     │ • Build      │
+  │ • Boot       │      │ • Boot       │     │ • Boot       │
+  │ • Test       │      │ • Test       │     │ • Test       │
+  └──────┬───────┘      └──────┬───────┘     └──────┬───────┘
+         ▲                     ▲                     ▲
+         │ IPMI                │ Beaker              │ SSH
+         └─────────────────────┴─────────────────────┘
+```
+
+**Workflow for each commit:**
+
+1. Control machine deploys bash library to all test hosts (first run only)
+2. Protects current kernel(s) from deletion on all hosts
+3. For each commit in the bisection range:
+   - **Phase 1 - Build** (parallel): Builds kernel on all test hosts simultaneously
+   - **Phase 2 - Install & Reboot** (parallel): Installs kernel with one-time boot (grub-reboot) and reboots all hosts
+   - **Phase 3 - Wait** (parallel): Waits for all hosts to boot (SSH connectivity check)
+   - **Phase 4 - Test** (parallel): Runs role-specific tests on all hosts simultaneously
+   - **Phase 5 - Aggregate**: Collects results from all hosts and marks commit:
+     - ALL pass → GOOD
+     - ANY fail → BAD
+     - ANY skip → SKIP
+4. Reports the exact commit that introduced the bug
+
+**Multi-host benefits:**
+- Parallel execution reduces total bisection time
+- Test distributed systems and network interactions
+- Each host can use different power control mechanisms
+- Per-host metadata and logs for debugging
+
+**Recovery from failures:**
+- Kernel panics: One-time boot falls back to protected kernel automatically
+- Boot timeouts: Power control handles recovery (IPMI reset, Beaker reboot, or SSH)
+- Build failures: Automatically marked as skip
+- Per-host failure isolation: Other hosts continue if one fails
+
+## Common Issues
+
+### Test host won't boot after kernel install
+
+```bash
+# Force power cycle (IPMI)
 kbisect ipmi cycle
 
-# Force power off
-kbisect ipmi off
+# Or manually via IPMI console
+ipmitool -I lanplus -H <ipmi-ip> -U <user> -P <pass> sol activate
+
+# For Beaker systems
+bkr system-power --action reboot --force <hostname>
+
+# For SSH-only (requires host to be responsive)
+ssh root@<test-host-ip> 'reboot'
 ```
 
-**Deployment management:**
+### Build fails with "No space left on device"
 
 ```bash
-# Verify slave is deployed
-kbisect deploy --verify-only
+# Check disk space on test host
+ssh root@<test-host-ip> 'df -h /boot'
 
-# Update library on slave (if you modified bisect-functions.sh)
-kbisect deploy --update-only
-
-# Full redeployment
-kbisect deploy
+# Manual cleanup (keeps only 1 test kernel)
+ssh root@<test-host-ip> 'source /root/kernel-bisect/lib/bisect-functions.sh && KEEP_TEST_KERNELS=1 cleanup_old_kernels'
 ```
 
-**Check database directly:**
+### SSH connection fails
 
 ```bash
-# View all collected metadata (from your bisection directory)
-sqlite3 ./bisect.db "SELECT * FROM metadata;"
+# Verify passwordless SSH works
+ssh root@<test-host-ip> 'echo test'  # Should print "test" without password prompt
 
-# View kernel configs captured (stored in state_dir, default: current directory)
-ls -l ./configs/
+# If needed, re-copy SSH key
+ssh-copy-id root@<test-host-ip>
 
-# View a specific config
-cat ./configs/config-6.5.0-bisect-a1b2c3d
+# For multiple hosts, repeat for each
+for host in host1 host2 host3; do
+    ssh-copy-id root@$host
+done
 ```
 
----
+### Build dependencies missing on test host
 
-## Configuration
+```bash
+# RHEL/Fedora
+ssh root@<test-host-ip> 'dnf groupinstall "Development Tools" && dnf install ncurses-devel bc bison flex elfutils-libelf-devel openssl-devel'
 
-**Per-Directory Configuration:** Each bisection case has its own `bisect.yaml` file in its directory.
+# Debian/Ubuntu
+ssh root@<test-host-ip> 'apt install build-essential libncurses-dev bc bison flex libelf-dev libssl-dev'
 
-Default location: `./bisect.yaml` (current working directory)
-
-Override with: `kbisect -c /path/to/config.yaml`
-
-### Minimum Required Config
-
-```yaml
-slave:
-  hostname: 192.168.1.100        # Required: Your slave IP
-  ssh_user: root
-  kernel_path: /root/kernel
+# For multiple hosts, use a loop
+for host in host1 host2 host3; do
+    ssh root@$host 'dnf groupinstall "Development Tools" && dnf install ncurses-devel bc bison flex elfutils-libelf-devel openssl-devel'
+done
 ```
 
-### Full Configuration Example
+## Global Options
 
-```yaml
-# Slave machine
-slave:
-  hostname: 192.168.1.100
-  ssh_user: root
-  kernel_path: /root/kernel
-  bisect_path: /root/kernel-bisect/lib
+All kbisect commands support these global options:
 
-# IPMI for power control (optional but recommended)
-ipmi:
-  host: 192.168.1.101
-  username: admin
-  password: changeme              # Use secrets manager in production
+```bash
+# Use custom config file (default: bisect.yaml)
+kbisect -c /path/to/config.yaml <command>
 
-# Deployment settings
-deployment:
-  auto_deploy: true               # Auto-deploy to slave if not set up
+# Enable verbose/debug output
+kbisect --verbose <command>
+kbisect -v <command>
 
-# Timeouts (in seconds)
-timeouts:
-  boot: 300                       # Max time to wait for slave to boot (default: 300s)
-  test: 600                       # Max time for test script execution (default: 600s)
-  build: 1800                     # Max time for kernel build (default: 1800s / 30 min)
+# Example
+kbisect -v -c my-config.yaml start
+```
 
-# Disk space management
-disk_management:
-  boot_min_free_mb: 500           # Minimum free space in /boot before cleanup
-  boot_emergency_mb: 100          # Emergency cleanup threshold
-  keep_test_kernels: 2            # Number of test kernels to keep
+### Additional Commands
+
+**Build-Only Mode:**
+```bash
+# Build kernel without bisection
+kbisect build <commit>              # Build specific commit
+kbisect build <commit> --save-logs  # Build and save logs to database
+
+# View build logs
+kbisect logs list                    # List all logs
+kbisect logs show <log-id>           # View specific log
+```
+
+**Power Control (IPMI):**
+```bash
+# IPMI commands (requires IPMI configured for at least one host)
+kbisect ipmi status                  # Check power status
+kbisect ipmi on                      # Power on
+kbisect ipmi off                     # Power off
+kbisect ipmi reset                   # Hard reset
+kbisect ipmi cycle                   # Power cycle (off → wait → on)
+
+# Note: For multi-host setups with multiple IPMI hosts,
+# the first configured host is used
+```
+
+**Configuration Validation:**
+```bash
+# Validate configuration and check host connectivity
+kbisect check                        # Validates:
+                                     # - SSH connectivity to all hosts
+                                     # - Power controller health (IPMI/Beaker)
+                                     # - Kernel source availability
+                                     # - Build dependencies
+```
+
+**Monitoring:**
+```bash
+# Monitor host health
+kbisect monitor                      # One-time check
+kbisect monitor --continuous         # Continuous monitoring
+kbisect monitor --interval 5         # Check every 5 seconds
+```
+
+## Advanced Usage
 
 # Kernel configuration
 kernel_config:
-  # Path to base .config file on master machine (optional)
+  # Path to base .config file on control machine (optional)
   # Can be absolute or relative to config file location
-  # File will be automatically transferred to slave during initialization
+  # File will be automatically transferred to all test hosts during initialization
   # If not specified, kernel defaults are used
   config_file: null
 
@@ -639,7 +702,7 @@ metadata:
 console_logs:
   enabled: false                    # Enable console log collection during boot
   collector: "auto"                 # "conserver" | "ipmi" | "auto"
-  # Override hostname for console connection (default: uses slave hostname)
+  # Override hostname for console connection (default: uses test host hostname)
   hostname: null
   # Fall back to IPMI SOL if conserver fails (default: true)
   fallback_to_ipmi: true
@@ -652,549 +715,143 @@ console_logs:
 # Build logs and console logs are stored in the database (see console_logs above)
 ```
 
-### Security Considerations
+Configure kernel config in your bisect.yaml before running init:
 
-**IPMI Passwords:**
 ```yaml
-# Option 1: Plain text (not recommended for production)
-ipmi:
-  password: changeme
+# Option 1: Provide config file
+kernel_config:
+  config_file: /path/to/.config
 
-# Option 2: Use environment variable
-ipmi:
-  password: ${IPMI_PASSWORD}      # Set IPMI_PASSWORD env var
-
-# Option 3: Use secrets management (recommended)
-# Integrate with HashiCorp Vault, AWS Secrets Manager, etc.
+# Option 2: Use running kernel's config
+kernel_config:
+  use_running_config: true
 ```
 
----
-
-## Advanced Features
-
-### Kernel Protection
-
-**Automatic protection** of your production kernel - will never be deleted, even in emergency cleanup.
+Then run bisection:
 
 ```bash
-# Initialized automatically on first run
-# To verify:
-kbisect deploy --verify-only
-
-# Check protected kernels via SSH:
-ssh root@slave 'source /root/kernel-bisect/lib/bisect-functions.sh && list_kernels'
+kbisect init v6.1 v6.6
+kbisect start
 ```
 
-### Metadata Collection
+### Multi-Host Configuration
 
-**Automatically captures** for every iteration:
-- System info (hostname, OS, arch)
-- Hardware info (CPU, RAM)
-- Kernel version and loaded modules
-- Kernel .config files
-- Package versions (rpm -qa / dpkg -l)
+Configure multiple test hosts for parallel bisection:
 
-**Access metadata:**
+```yaml
+# Example: Network testing with server and client roles
+hosts:
+  - hostname: server1.example.com
+    ssh_user: root
+    kernel_path: /root/kernel
+    bisect_path: /root/kernel-bisect/lib
+    test_script: test-server.sh      # Server-specific test
+    power_control_type: ipmi
+    ipmi_host: ipmi1.example.com
+    ipmi_user: admin
+    ipmi_password: secret1
 
-```bash
-# View in report
-kbisect report --format json
+  - hostname: client1.example.com
+    ssh_user: root
+    kernel_path: /root/kernel
+    bisect_path: /root/kernel-bisect/lib
+    test_script: test-client.sh      # Client-specific test
+    power_control_type: beaker       # Different power control type
 
-# Query database (from your bisection directory)
-sqlite3 ./bisect.db << EOF
-SELECT collection_type, collection_time FROM metadata;
-EOF
+  - hostname: client2.example.com
+    ssh_user: root
+    kernel_path: /root/kernel
+    test_script: test-client.sh
+    power_control_type: null         # SSH fallback
 
-# View captured kernel configs
-ls ./configs/
-
-# Compare configs between commits
-diff ./configs/config-6.5.0-bisect-a1b2c3d \
-     ./configs/config-6.5.0-bisect-d4e5f6g
+# All hosts build, reboot, and test in parallel
+# All must pass for commit to be marked GOOD
 ```
 
-### Build Logs and Console Log Collection
+### Per-Host Kernel Configurations
 
-**Build logs** are automatically captured and stored in the database with gzip compression:
+Each host can use a different kernel config:
+
+```yaml
+# Global config (applies to all hosts unless overridden)
+kernel_config:
+  config_file: /tmp/baseline-config
+
+hosts:
+  - hostname: server1.example.com
+    kernel_config_file: /tmp/server-config   # Override for this host
+
+  - hostname: client1.example.com
+    kernel_config_file: /tmp/client-config   # Different config for this host
+
+  - hostname: client2.example.com
+    # Uses global kernel_config
+```
+
+**Use cases:**
+- Testing same kernel with different config options
+- Hardware-specific config requirements
+- Debug builds on some hosts, production builds on others
+
+### Monitor test host health
 
 ```bash
-# List all build logs
+# One-time check
+kbisect monitor
+
+# Continuous monitoring
+kbisect monitor --continuous --interval 5
+```
+
+### View build logs
+
+```bash
+# List all logs
 kbisect logs list
 
-# Output:
-# Log ID   Iter   Commit    Type     Status     Size       Timestamp
-# -----------------------------------------------------------------------
-# 1        1      a1b2c3d   build    SUCCESS    45.2 KB    2024-01-15 10:23:45
-# 2        1      a1b2c3d   console  SUCCESS    12.1 KB    2024-01-15 10:28:12
-# 3        2      d4e5f6g   build    FAILED     67.8 KB    2024-01-15 11:15:30
+# View specific log
+kbisect logs show <log-id>
 
-# View specific build log
-kbisect logs show 3
+# View logs for iteration
+kbisect logs iteration 3
 
-# View all logs for an iteration
-kbisect logs iteration 2
+# Follow log in real-time
+kbisect logs tail <log-id>
 
 # Export log to file
-kbisect logs export 3 /tmp/build-log.txt
+kbisect logs export <log-id> /tmp/build.log
 ```
 
-**Console log collection** captures serial console output during boot (requires configuration):
-
-- **Conserver** (default): Uses `console <hostname>` command for console access
-  - Requires conserver server configured and accessible from master
-  - Authentication via kerberos or conserver config file
-  - Non-blocking: runs in background thread during boot
-
-- **IPMI SOL** (fallback): Uses IPMI Serial-Over-LAN for console access
-  - Automatically used if conserver fails or unavailable
-  - Requires IPMI configured in bisect.yaml
-
-**Enable console log collection:**
+### View metadata
 
 ```bash
-# Option 1: Via CLI flag
-kbisect init v6.1 v6.6 --collect-console-logs
-kbisect start --collect-console-logs
+# List all metadata
+kbisect metadata list
 
-# Option 2: In config file (applies to that bisection directory)
-# bisect.yaml:
-console_logs:
-  enabled: true
-  collector: "auto"  # Try conserver first, fall back to IPMI SOL
-  fallback_to_ipmi: true
+# Show specific metadata
+kbisect metadata show <metadata-id>
+
+# Export metadata to file
+kbisect metadata export <metadata-id> -o metadata.json
+
+# Export metadata file
+kbisect metadata export-file <file-id> -o config.txt
 ```
 
-**Console log usage:**
+### Manual IPMI control
 
 ```bash
-# List console logs
-kbisect logs list --log-type console
-
-# View console log for specific iteration
-kbisect logs iteration 3
-# Shows both build log and console log if captured
-
-# Export console log
-kbisect logs show <log-id>
-```
-
-**Use cases for console logs:**
-- Debug kernel panics (see exact panic message and stack trace)
-- Identify boot hangs (see where boot process stops)
-- Analyze early boot issues (before SSH is available)
-- Capture firmware/BIOS messages
-- Debug bootloader issues
-
-### Disk Space Management
-
-**Automatic cleanup** when /boot gets full:
-
-- Monitors disk space before each build
-- Triggers cleanup when below threshold (default: 500MB)
-- Keeps N most recent test kernels (default: 2)
-- **Never deletes protected/production kernels**
-- Triple verification before deletion
-
-**Manual cleanup:**
-
-```bash
-# Force cleanup on slave (keep only 1 test kernel)
-ssh root@slave 'source /root/kernel-bisect/lib/bisect-functions.sh && KEEP_TEST_KERNELS=1 cleanup_old_kernels'
-```
-
-### Boot Failure Recovery
-
-**Automatic recovery** from kernel panics and boot failures:
-
-The tool uses **one-time boot** mechanism to automatically detect and recover from kernel panics:
-
-1. **One-time boot setup**:
-   - Test kernels are set to boot **only once** using `grub-reboot`/`grub2-reboot`
-   - Protected kernel remains as permanent GRUB default
-   - If test kernel panics, system automatically falls back to protected kernel
-
-2. **Kernel panic detection and handling**:
-   - After reboot, master checks which kernel actually booted (`uname -r`)
-   - Compares actual kernel vs expected test kernel
-   - If they don't match → kernel panic detected
-   - **Action depends on test mode**:
-     - **Boot test mode** (no --test-script): Marks as **BAD** ✗ (we're testing bootability)
-     - **Custom test mode** (with --test-script): Marks as **SKIP** ⊘ (can't test functionality if kernel doesn't boot)
-   - No need for crash dumps or manual intervention
-
-3. **Boot failure scenarios and IPMI recovery**:
-   - **Kernel panics during boot**:
-     - GRUB falls back to protected kernel (one-time boot)
-     - Master detects wrong kernel booted
-     - Boot test → marked **BAD** ✗ (kernel is unbootable)
-     - Custom test → marked **SKIP** ⊘ (can't test functionality)
-
-   - **Boot timeout (kernel hangs during boot)**:
-     - Slave doesn't respond to SSH within timeout (default 300s)
-     - **If IPMI configured**: Master triggers IPMI power cycle for recovery
-       - Automatic retry logic: up to 3 recovery attempts with 30s delays
-       - Each attempt: power cycle → wait for boot → verify SSH connectivity
-       - If any attempt succeeds → marks commit and continues bisection
-       - If all attempts fail → session marked as "halted" (see below)
-     - Slave reboots and falls back to protected kernel (one-time boot)
-     - Boot test → marked **BAD** ✗ (kernel failed to boot)
-     - Custom test → marked **SKIP** ⊘ (can't test functionality)
-     - **If IPMI not configured**: Manual intervention required
-
-   - **Complete recovery failure (all IPMI retries exhausted)**:
-     - If all 3 IPMI recovery attempts fail and slave remains unreachable
-     - **Session halted automatically**:
-       - Status changed to "halted" in database
-       - Git bisect state NOT updated yet (commit remains unmarked)
-       - Detailed error message logged with recovery instructions
-       - Bisection exits cleanly with exit code 1
-     - **Manual recovery required**:
-       1. Fix slave machine (power on, boot stable kernel manually)
-       2. Verify SSH connectivity
-       3. Run `kbisect start` to resume
-     - **On resume**:
-       - Tool detects halted session
-       - Verifies slave is reachable
-       - Marks pending commit appropriately (bad or skip)
-       - Continues bisection from next commit
-     - This ensures git bisect state stays synchronized even after complete failures
-
-**Example recovery flow (boot test mode):**
-```
-1. Build test kernel: 6.5.0-bisect-abc123
-2. Set one-time boot: grub2-reboot "6.5.0-bisect-abc123"
-3. Reboot slave
-4. Kernel panics during boot
-5. GRUB automatically boots protected kernel (6.5.0-production)
-6. SSH comes back up
-7. Master checks: uname -r = "6.5.0-production" (not 6.5.0-bisect-abc123)
-8. Master marks abc123 as BAD: "Kernel panic detected - kernel failed to boot"
-9. Continue bisection with next commit
-```
-
-**Example recovery flow (custom test mode with --test-script):**
-```
-1. Build test kernel: 6.5.0-bisect-abc123
-2. Set one-time boot: grub2-reboot "6.5.0-bisect-abc123"
-3. Reboot slave
-4. Kernel panics during boot
-5. GRUB automatically boots protected kernel (6.5.0-production)
-6. SSH comes back up
-7. Master checks: uname -r = "6.5.0-production" (not 6.5.0-bisect-abc123)
-8. Master marks abc123 as SKIP: "Cannot test functionality if kernel doesn't boot"
-9. Git bisect picks different commit to test
-10. Continue bisection until finding commit that boots but fails custom test
-```
-
-**Example recovery flow (boot timeout with IPMI recovery):**
-```
-1. Build test kernel: 6.5.0-bisect-abc123
-2. Set one-time boot: grub2-reboot "6.5.0-bisect-abc123"
-3. Reboot slave
-4. Kernel hangs during boot (stuck, not panic)
-5. Master waits for SSH... 30s, 60s, 90s... up to 300s (boot timeout)
-6. SSH timeout reached - slave not responding
-7. Master logs: "Slave failed to reboot within timeout"
-8. Master detects IPMI is configured
-9. Master triggers IPMI power cycle: ipmitool power cycle
-10. Slave force reboots
-11. GRUB boots protected kernel (test kernel was one-time only)
-12. SSH comes back up
-13. Master checks: uname -r = "6.5.0-production"
-14. Boot test mode → marks abc123 as BAD: "Boot timeout - kernel failed to boot"
-    Custom test mode → marks abc123 as SKIP: "Boot timeout - cannot test functionality"
-15. Continue bisection with next commit
-```
-
-**Manual recovery (if needed):**
-
-```bash
-# If slave is completely stuck:
-kbisect ipmi cycle
-
-# Check IPMI status:
+# Check power status
 kbisect ipmi status
-```
 
-### Resume After Interruption
-
-**State persisted in SQLite** - bisection can resume after:
-- Master machine reboot
-- Network interruption
-- Manual cancellation (Ctrl+C)
-- Complete slave failure (session halted)
-
-```bash
-# Resume automatically
-kbisect start
-
-# Or check status first
-kbisect status
-# If session is "running" or "halted", just run kbisect start to resume
-```
-
-**Halted session recovery:**
-
-If a session is marked as "halted" (slave became completely unreachable after all IPMI recovery attempts):
-
-```bash
-# 1. Fix the slave machine
-# - Manually power on or reboot the slave
-# - Ensure it boots into a stable kernel
-# - Verify SSH works: ssh root@<slave-ip>
-
-# 2. Resume bisection
-kbisect start
-
-# What happens on resume:
-# - Tool detects halted session
-# - Shows last failed iteration details
-# - Verifies slave is now reachable
-# - Marks pending commit (bad or skip based on test mode)
-# - Continues with next commit
-```
-
-Example output when resuming halted session:
-```
-======================================================================
-RESUMING HALTED BISECTION SESSION
-======================================================================
-
-Session ID: 1
-Good commit: v6.1
-Bad commit: v6.6
-Started: 2024-01-15 10:00:00
-
-Last iteration: 5
-Failed commit: abc123d
-Error: Boot timeout - kernel failed to boot (git mark pending - slave down)
-
-The previous session was halted due to slave being unreachable.
-Before resuming, please ensure:
-  1. The slave machine is powered on and stable
-  2. A stable kernel is booted
-  3. SSH connectivity is working
-
-Verifying slave connectivity...
-✓ Slave is reachable
-
-Marking pending commit abc123d...
-  Boot test mode: marking as BAD
-✓ Commit marked as bad
-Bisection will continue from next commit.
-======================================================================
-```
-
----
-
-## Troubleshooting
-
-### Slave won't boot after kernel install
-
-**Symptoms:** Slave doesn't respond after reboot, SSH timeout.
-
-**Solution:**
-
-```bash
-# 1. Force power cycle via IPMI
+# Power cycle
 kbisect ipmi cycle
 
-# 2. If still not responding, power off and use IPMI console
+# Power off
 kbisect ipmi off
-
-# 3. Access IPMI console (use your IPMI web interface or):
-ipmitool -I lanplus -H <ipmi-ip> -U <user> -P <pass> sol activate
-
-# 4. Power on and select safe kernel from GRUB menu
-kbisect ipmi on
-
-# 5. In GRUB, select the protected kernel
-# (First entry should be your protected production kernel)
 ```
 
-### Disk space issues on slave
-
-**Symptoms:** Build fails with "No space left on device"
-
-**Solution:**
-
-```bash
-# Check disk space
-ssh root@slave 'df -h /boot'
-
-# Emergency cleanup (keeps only 1 test kernel)
-ssh root@slave 'source /root/kernel-bisect/lib/bisect-functions.sh && KEEP_TEST_KERNELS=1 cleanup_old_kernels'
-
-# List all kernels
-ssh root@slave 'source /root/kernel-bisect/lib/bisect-functions.sh && list_kernels'
-
-# Verify protected kernel is intact
-ssh root@slave 'source /root/kernel-bisect/lib/bisect-functions.sh && verify_protection'
-```
-
-### Build fails repeatedly
-
-**Symptoms:** All builds fail with compilation errors.
-
-**Check:**
-
-1. **Kernel source is clean:**
-   ```bash
-   ssh root@slave 'cd /root/kernel && git status'
-   ssh root@slave 'cd /root/kernel && git clean -fdx'  # Removes all untracked files
-   ```
-
-2. **Build dependencies installed:**
-   ```bash
-   ssh root@slave 'dnf groupinstall "Development Tools"'
-   ssh root@slave 'dnf install ncurses-devel bc bison flex elfutils-libelf-devel openssl-devel'
-   ```
-
-3. **Check specific build error:**
-   ```bash
-   kbisect status  # Shows recent error messages
-   ```
-
-### IPMI not responding
-
-**Symptoms:** IPMI commands timeout or fail.
-
-**Check:**
-
-1. **Network connectivity:**
-   ```bash
-   ping <ipmi-ip>
-   ```
-
-2. **IPMI manually:**
-   ```bash
-   ipmitool -I lanplus -H <ipmi-ip> -U <user> -P <pass> power status
-   ```
-
-3. **Credentials in config:**
-   ```bash
-   cat ./bisect.yaml | grep -A 3 ipmi
-   ```
-
-4. **IPMI interface enabled:**
-   - Check BIOS settings
-   - Ensure IPMI network is configured on slave
-
-### SSH connection fails
-
-**Symptoms:** "SSH connectivity failed" during initialization.
-
-**Check:**
-
-1. **Passwordless SSH:**
-   ```bash
-   ssh root@<slave-ip> 'echo test'
-   # Should print "test" without password prompt
-   ```
-
-2. **SSH key copied:**
-   ```bash
-   ssh-copy-id root@<slave-ip>
-   ```
-
-3. **Firewall rules:**
-   ```bash
-   # On slave, ensure SSH is allowed
-   firewall-cmd --list-services  # Should include 'ssh'
-   ```
-
-### "Deployment failed" error
-
-**Symptoms:** `kbisect deploy` fails.
-
-**Common causes:**
-
-1. **Library path doesn't exist:**
-   ```bash
-   # Master needs lib/bisect-functions.sh
-   ls /opt/kernel-bisect/kernel-bisect/lib/bisect-functions.sh
-   ```
-
-2. **SSH not working:**
-   ```bash
-   ssh root@<slave-ip> 'mkdir -p /root/kernel-bisect/lib'
-   ```
-
-### Console log collection not working
-
-**Symptoms:** Console logs are not being captured, or "Console log collection skipped" message.
-
-**Check:**
-
-1. **Console logs enabled:**
-   ```bash
-   # Check config file
-   cat ./bisect.yaml | grep -A 5 console_logs
-
-   # Or use CLI flag
-   kbisect start --collect-console-logs
-   ```
-
-2. **Conserver installed and configured:**
-   ```bash
-   # Test console command manually
-   console <slave-hostname>
-   # Should connect to slave's console (Ctrl+E c q to exit)
-
-   # If command not found, install conserver-client
-   sudo dnf install conserver-client  # RHEL/Fedora
-   sudo apt-get install conserver-client  # Debian/Ubuntu
-   ```
-
-3. **Conserver authentication:**
-   ```bash
-   # Check kerberos ticket if using kerberos auth
-   klist
-
-   # Or check conserver config file
-   cat ~/.consolerc
-   ```
-
-4. **IPMI SOL fallback (if conserver fails):**
-   ```bash
-   # Verify IPMI is configured in bisect.yaml
-   cat ./bisect.yaml | grep -A 3 ipmi
-
-   # Test IPMI SOL manually
-   ipmitool -I lanplus -H <ipmi-ip> -U <user> -P <pass> sol activate
-   # (Ctrl+] then . to exit)
-   ```
-
-5. **Check logs for specific errors:**
-   ```bash
-   # Logs are printed to terminal during kbisect execution
-   # To save logs to a file for later review:
-   kbisect start 2>&1 | tee bisection-output.log
-   # Look for "Console log collection" messages in the output
-   ```
-
-**Common issues:**
-
-- **Conserver authentication failure**: Configure kerberos or ~/.consolerc
-- **IPMI SOL timeout**: Check IPMI network connectivity
-- **Hostname mismatch**: Use `console_hostname` in config to override
-- **Console logs optional**: Bisection continues even if console collection fails
-
----
-
-## Safety Features
-
-### Protected Kernels
-
-**Your production kernel is safe:**
-
-- Locked at first initialization
-- Never deleted, even in emergency cleanup
-- Verified after every cleanup operation
-- Set as GRUB permanent default (fallback kernel for failed test kernels)
-- Test kernels use one-time boot - always fall back to protected kernel on panic
-
-**How it works:**
+### Deployment options
 
 ```bash
 # At init, current running kernel is protected
@@ -1227,9 +884,9 @@ Every cleanup operation checks:
 **Location:** `./bisect.db` (in your bisection directory)
 
 **Survives:**
-- Master machine crashes/reboots
+- Control machine crashes/reboots
 - Network interruptions
-- Power failures (slave reboots to safe kernel)
+- Power failures (test host reboots to safe kernel)
 - Manual cancellation
 
 ### Non-Interactive Builds
@@ -1247,16 +904,16 @@ Every cleanup operation checks:
 
 ### System Design
 
-**Master-Slave Architecture:**
+**Control-Test Architecture:**
 
-- **Master**: Python orchestration engine, CLI interface, state management
-- **Slave**: Bash library with functions, no autonomous processes
+- **Control Machine**: Python orchestration engine, CLI interface, state management
+- **Test Host(s)**: Bash library with functions, no autonomous processes
 - **Communication**: SSH only (no HTTP, no agents, no daemons)
 
 **Why this design?**
 
-- ✅ Simple: One bash library file on slave
-- ✅ Stateless slave: Master controls everything
+- ✅ Simple: One bash library file on each test host
+- ✅ Stateless test hosts: Control machine orchestrates everything
 - ✅ Reliable: SSH is mature and well-tested
 - ✅ Secure: Standard SSH authentication and encryption
 - ✅ Maintainable: All logic in master Python code
@@ -1266,9 +923,9 @@ Every cleanup operation checks:
 ```
 1. Master: kbisect init v6.1 v6.6
    ↓
-2. Master: Check if slave deployed
+2. Control: Check if test hosts deployed
    ↓
-3. Master: Deploy lib/bisect-functions.sh to slave
+3. Control: Deploy lib/bisect-functions.sh to all test hosts
    ↓
 4. Master: SSH call: init_protection()
    ↓
@@ -1278,10 +935,10 @@ Every cleanup operation checks:
    ↓
 7. Loop: For each commit from git bisect
    ├─ Master: SSH call: build_kernel(commit_sha)
-   ├─ Slave: Build kernel, install, set one-time boot (grub-reboot)
-   ├─ Master: Store build log in SQLite (gzip compressed)
-   ├─ Master: Start console log collection (if enabled) - conserver or IPMI SOL
-   ├─ Master: Reboot slave
+   ├─ Test Host: Build kernel, install, set one-time boot (grub-reboot)
+   ├─ Control: Store build log in SQLite (gzip compressed)
+   ├─ Control: Start console log collection (if enabled) - conserver or IPMI SOL
+   ├─ Control: Reboot test host
    ├─ Master: Wait for SSH (boot detection)
    ├─ Master: Stop console collection, store boot log in SQLite
    ├─ Master: Verify kernel version (detect panics)
@@ -1303,20 +960,20 @@ kernel-bisect/
 ├── config/
 │   └── bisect.conf.example       # Configuration template
 ├── lib/
-│   └── bisect-functions.sh       # Bash library (deployed to slave)
+│   └── bisect-functions.sh       # Bash library (deployed to test hosts)
 ├── master/
 │   ├── bisect_master.py          # Main orchestration
 │   ├── state_manager.py          # SQLite state management
-│   ├── slave_deployer.py         # Automatic deployment
-│   ├── slave_monitor.py          # Boot detection
+│   ├── host_deployer.py          # Automatic deployment
+│   ├── host_monitor.py           # Boot detection
 │   ├── ipmi_controller.py        # IPMI power control
 │   └── console_collector.py      # Console log collection (conserver/IPMI SOL)
 └── README.md
 
-Deployed to slave:
+Deployed to test host(s):
 /root/kernel-bisect/lib/bisect-functions.sh
-/var/lib/kernel-bisect/protected-kernels.list  # Protected kernel list (on slave)
-/var/lib/kernel-bisect/safe-kernel.info         # Safe kernel info (on slave)
+/var/lib/kernel-bisect/protected-kernels.list  # Protected kernel list (on test host)
+/var/lib/kernel-bisect/safe-kernel.info         # Safe kernel info (on test host)
 
 Created in bisection directory (master):
 your-bisection-dir/
@@ -1387,57 +1044,134 @@ kbisect start
 # Result: First bad commit found: commit abc123def456
 ```
 
-### Example 2: Network Performance Regression
+### Example 2: Network Performance Regression (Multi-Host)
 
 ```bash
-# Problem: Network throughput dropped from 10Gbps to 5Gbps
+# Problem: Network throughput dropped from 10Gbps to 5Gbps between kernel versions
+# Solution: Use multi-host setup with server and client roles
 
-# 1. Create test script
-cat > test-network.sh << 'EOF'
+# 1. Create server test script
+cat > test-server.sh << 'EOF'
 #!/bin/bash
-# Measure network throughput
-THROUGHPUT=$(iperf3 -c 192.168.1.200 -t 10 -J | jq '.end.sum_received.bits_per_second')
+# Start iperf3 server in background
+iperf3 -s -D
+sleep 2
+echo "Server started"
+exit 0  # Server always returns GOOD
+EOF
+chmod +x test-server.sh
+
+# 2. Create client test script
+cat > test-client.sh << 'EOF'
+#!/bin/bash
+# Measure network throughput against server
+THROUGHPUT=$(iperf3 -c server1.example.com -t 10 -J | jq '.end.sum_received.bits_per_second')
 THRESHOLD=8000000000  # 8 Gbps
 
 if [ "$THROUGHPUT" -lt "$THRESHOLD" ]; then
-    echo "Regression: ${THROUGHPUT}bps"
-    exit 1
+    echo "Performance regression: ${THROUGHPUT}bps < ${THRESHOLD}bps"
+    exit 1  # BAD
 else
-    echo "OK: ${THROUGHPUT}bps"
-    exit 0
+    echo "Performance OK: ${THROUGHPUT}bps"
+    exit 0  # GOOD
 fi
 EOF
-chmod +x test-network.sh
+chmod +x test-client.sh
 
-# 2. Run bisection with network test
+# 3. Configure multi-host bisection
+cat > bisect.yaml << 'EOF'
+hosts:
+  - hostname: server1.example.com      # Server role
+    ssh_user: root
+    kernel_path: /root/kernel
+    test_script: test-server.sh
+    power_control_type: ipmi
+    ipmi_host: ipmi1.example.com
+    ipmi_user: admin
+    ipmi_password: secret1
+
+  - hostname: client1.example.com      # Client role
+    ssh_user: root
+    kernel_path: /root/kernel
+    test_script: test-client.sh
+    power_control_type: ipmi
+    ipmi_host: ipmi2.example.com
+    ipmi_user: admin
+    ipmi_password: secret2
+
+kernel_repo:
+  source: https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git
+EOF
+
+# 4. Run multi-host bisection
 kbisect init v6.1 v6.6
-kbisect start --test-script ./test-network.sh
+kbisect start
 
-# 3. View results
+# Both hosts will build, reboot, and test in parallel
+# If client test fails (performance regression), commit marked BAD
+# If both pass, commit marked GOOD
+
+# 5. View results
 kbisect report
 ```
 
-### Example 3: Using Custom Kernel Config
+### Example 3: Build-Only Testing
+
+```bash
+# Problem: Want to verify a commit builds before running full bisection
+
+# 1. Configure bisect.yaml
+cat > bisect.yaml << 'EOF'
+hosts:
+  - hostname: 192.168.1.100
+    ssh_user: root
+    kernel_path: /root/kernel
+
+kernel_config:
+  config_file: /tmp/debug.config  # Custom config with DEBUG options
+EOF
+
+# 2. Test build for specific commit
+kbisect build v6.6 --save-logs
+
+# Output:
+# ✓ Commit exists on all hosts
+# Building kernel on 1 hosts...
+# ✓ Build complete on all hosts
+# Build logs saved. View with: kbisect logs list --session-id 1
+
+# 3. If build succeeds, proceed with bisection
+kbisect init v6.1 v6.6
+kbisect start
+```
+
+### Example 4: Using Custom Kernel Config
 
 ```bash
 # Problem: Need to test with specific kernel config (DEBUG options enabled)
 
-# 1. Create custom config on master
-scp root@slave:/boot/config-$(uname -r) /tmp/debug.config
+# 1. Create custom config on control machine
+scp root@<test-host-ip>:/boot/config-$(uname -r) /tmp/debug.config
 vim /tmp/debug.config
 # Add: CONFIG_DEBUG_INFO=y
 #      CONFIG_DEBUG_KERNEL=y
 
 # 2. Configure bisection to use custom config
 cat > bisect.yaml <<EOF
+hosts:
+  - hostname: 192.168.1.100
+    ssh_user: root
+    kernel_path: /root/kernel
+
 kernel_config:
-  config_file: /tmp/debug.config  # Path on master (will be transferred to slave)
+  config_file: /tmp/debug.config  # Path on control machine (auto-transferred)
 EOF
 
 # 3. Run bisection
+kbisect init v6.1 v6.6
 kbisect start
 
-# 4. All kernels built with DEBUG config
+# 4. All kernels built with DEBUG config across all hosts
 ```
 
 ---
@@ -1451,185 +1185,78 @@ A: Depends on the commit range. Formula: ~log2(commits) iterations.
 - 100 commits: ~7 iterations
 - 1000 commits: ~10 iterations
 - Each iteration: build time (~30 min) + boot time (~2 min) + test time
+- Multi-host: Parallel builds reduce wall-clock time (all hosts build simultaneously)
 
-**Q: Can I bisect between non-tagged commits?**
+**Q: Can I bisect across multiple hosts?**
 
-A: Yes! Use any git ref:
+A: Yes! kbisect has native multi-host support. Configure multiple hosts in the `hosts` array with role-specific test scripts. All hosts must pass their tests for a commit to be marked GOOD. If any host fails, the commit is marked BAD. This is perfect for:
+- Network performance testing (server + client)
+- Distributed system issues
+- Hardware-specific bugs requiring multiple systems
+
+**Q: Which power control should I use?**
+
+A: Choose based on your infrastructure:
+- **IPMI** (recommended): Most reliable, supports hard reset, power cycling, and recovery. Best for production systems with IPMI/BMC interfaces.
+- **Beaker**: For hosts managed in Beaker lab automation systems. Requires Kerberos authentication.
+- **SSH Fallback**: Simplest option, uses SSH reboot command. No hard power control (can't force power-off). Good for development or systems without IPMI/Beaker.
+
+You can mix power control types - each host in a multi-host setup can use a different mechanism.
+
+**Q: Can I test if a commit builds without running bisection?**
+
+A: Yes! Use the build-only mode:
 ```bash
-kbisect init abc123 def456        # commit hashes
-kbisect init v6.1 HEAD             # tag to current
-kbisect init origin/stable HEAD    # branch to current
+kbisect build <commit> --save-logs
 ```
 
-**Q: What if build fails for some commits?**
+This builds the kernel on all configured hosts without rebooting, testing, or requiring `kbisect init`. Useful for:
+- Pre-build validation before starting bisection
+- Testing custom kernel configs
+- CI/CD integration
+- Debugging build failures
 
-A: Build failures are automatically marked as "skip" and git bisect continues.
+**Q: What happens if one host fails in multi-host bisection?**
 
-**Q: Can I run multiple bisections simultaneously?**
+A: The commit is marked BAD if ANY host fails. The aggregation logic is conservative:
+- ALL hosts PASS → Commit marked GOOD
+- ANY host FAILS → Commit marked BAD
+- ANY host SKIPS (e.g., build failure) → Commit marked SKIP
 
-A: No - one bisection per master-slave pair. But you can have multiple master-slave pairs.
+This ensures that regressions affecting any host are caught.
 
-**Q: What happens if I Ctrl+C during bisection?**
-
-A: State is saved in SQLite. Resume with `kbisect start`.
-
-**Q: Can I bisect without IPMI?**
-
-A: Yes, but recovery from boot timeouts/hangs will require manual intervention. Kernel panics are automatically detected (one-time boot mechanism falls back to protected kernel), but if a kernel hangs during boot without panicking, you'll need to manually power cycle the slave.
-
-**Q: Does this work with custom kernel trees?**
-
-A: Yes - just clone your tree to `/root/kernel` on slave.
-
-**Q: Can I test user-space regressions?**
-
-A: Yes - create a custom test script that tests your specific issue.
-
----
-
-## Development
-
-### Setting Up Development Environment
+### Reinitialize bisection
 
 ```bash
-# Clone the repository
-git clone <repository-url> kbisect
-cd kbisect
-
-# Install in development mode with dev dependencies
-pip install -e ".[dev]"
-
-# This installs:
-# - kbisect (editable, changes take effect immediately)
-# - ruff (linter and formatter)
-# - mypy (type checker)
-# - pytest (testing framework)
+# Reinitialize bisection range
+kbisect start --reinit
 ```
 
-### Development Workflow
+### Generate config file with custom name
 
-**Linting and Formatting:**
 ```bash
-# Check code quality
-ruff check src/
+# Default (creates bisect.yaml)
+kbisect init-config
 
-# Auto-fix issues
-ruff check src/ --fix
+# Custom filename
+kbisect init-config -o my-config.yaml
 
-# Format code
-ruff format src/
-
-# Run type checking
-mypy src/
+# Overwrite existing without prompt
+kbisect init-config --force
 ```
 
-**Testing:**
-```bash
-# Run tests (when available)
-pytest
-
-# Run with coverage
-pytest --cov=kbisect --cov-report=html
-```
-
-**Building:**
-```bash
-# Build distribution packages
-pip install build
-python -m build
-
-# This creates:
-# - dist/kbisect-X.Y.Z-py3-none-any.whl
-# - dist/kbisect-X.Y.Z.tar.gz
-```
-
-**Versioning:**
-The project uses `hatch-vcs` to automatically derive versions from git tags:
-```bash
-# Create a new version tag
-git tag v0.2.0
-git push --tags
-
-# Version is automatically updated in builds
-python -c "import kbisect; print(kbisect.__version__)"
-```
-
-### Project Structure
+## Project Structure
 
 ```
-kbisect/
-├── pyproject.toml              # Project metadata, dependencies, tool configs
-├── README.md                   # This file
-├── .gitignore                 # Git ignore patterns
-├── src/kbisect/               # Source code (src layout)
-│   ├── __init__.py
-│   ├── cli.py                 # CLI entry point
-│   ├── master/                # Master controller modules
-│   │   ├── bisect_master.py   # Main bisection logic
-│   │   ├── state_manager.py   # SQLite state management
-│   │   ├── slave_monitor.py   # Health monitoring
-│   │   ├── ipmi_controller.py # IPMI power control
-│   │   ├── slave_deployer.py  # Automatic deployment
-│   │   └── console_collector.py # Console log collection
-│   ├── lib/                   # Bash library (deployed to slave)
-│   │   └── bisect-functions.sh
-│   └── config/                # Configuration templates
-│       └── bisect.conf.example
-└── tests/                     # Test suite (pytest)
+your-bisection-dir/
+├── bisect.yaml       # Configuration
+├── bisect.db         # SQLite database (state, logs, metadata)
 ```
-
-### Code Style
-
-This project uses modern Python best practices:
-
-- **Type hints**: All functions have type annotations (Python 3.8+ compatible)
-- **Docstrings**: Google-style docstrings for all public APIs
-- **Formatting**: Ruff (replaces black, flake8, isort)
-- **Line length**: 100 characters
-- **Imports**: Sorted and organized (stdlib → third-party → local)
-- **Constants**: UPPER_CASE module-level constants
-- **Exceptions**: Custom exception classes for better error handling
-
-### Contributing
-
-Contributions welcome! Please:
-
-1. **Fork and create a branch**: `git checkout -b feature/your-feature`
-2. **Make your changes**: Follow the code style above
-3. **Run linters**: `ruff check src/ --fix && ruff format src/`
-4. **Run type checker**: `mypy src/`
-5. **Test your changes**: Add tests if applicable
-6. **Update documentation**: Update README if needed
-7. **Commit**: Use clear, descriptive commit messages
-8. **Push and create PR**: Describe your changes clearly
-
-**Before submitting:**
-```bash
-# Ensure code quality
-ruff check src/ --fix
-ruff format src/
-mypy src/
-
-# Run tests
-pytest
-```
-
----
-
-## Support
-
-- **Issues**: File at GitHub issues page
-- **Documentation**: This README and code comments
-- **Questions**: Open a discussion in GitHub
-
----
 
 ## License
 
-[Your License Here]
+MIT License
 
 ---
 
-**Happy bisecting!** 🎯
-
-Found a kernel regression? Now you can find the exact commit that caused it.
+**Need help?** File an issue at https://github.com/janjurca/kbisect/issues
