@@ -132,11 +132,7 @@ class HostManager:
         # Create power controller based on configured type
         self.power_controller: Optional["PowerController"] = None  # noqa: UP037
         if host_config.power_control_type == "ipmi":
-            if (
-                host_config.ipmi_host
-                and host_config.ipmi_user is not None
-                and host_config.ipmi_password is not None
-            ):
+            if host_config.ipmi_host and host_config.ipmi_user is not None and host_config.ipmi_password is not None:
                 from kbisect.power import IPMIController
 
                 self.power_controller = IPMIController(
@@ -276,12 +272,8 @@ class BisectMaster:
         if self.config.kernel_config_file:
             global_config_path = Path(self.config.kernel_config_file)
             if not global_config_path.exists():
-                logger.error(
-                    f"Global kernel config file not found on master: {self.config.kernel_config_file}"
-                )
-                raise FileNotFoundError(
-                    f"Global kernel config file not found: {self.config.kernel_config_file}"
-                )
+                logger.error(f"Global kernel config file not found on master: {self.config.kernel_config_file}")
+                raise FileNotFoundError(f"Global kernel config file not found: {self.config.kernel_config_file}")
             logger.debug(f"Global kernel config validated: {self.config.kernel_config_file}")
 
         # Process each host's kernel config (per-host or fallback to global)
@@ -344,17 +336,13 @@ class BisectMaster:
                 iteration_id,
                 host_id=self.host_managers[0].host_id,
             )
-            logger.debug(
-                f"Created placeholder metadata record (id: {metadata_id}) for iteration {iteration_id}"
-            )
+            logger.debug(f"Created placeholder metadata record (id: {metadata_id}) for iteration {iteration_id}")
             return metadata_id
         except Exception as exc:
             logger.warning(f"Failed to create placeholder metadata record: {exc}")
             return None
 
-    def collect_and_store_metadata(
-        self, collection_type: str, iteration_id: Optional[int] = None
-    ) -> bool:
+    def collect_and_store_metadata(self, collection_type: str, iteration_id: Optional[int] = None) -> bool:
         """Collect metadata from all hosts and store in database.
 
         If a placeholder metadata record already exists for this iteration,
@@ -367,9 +355,7 @@ class BisectMaster:
         Returns:
             True if metadata collected successfully from all hosts, False otherwise
         """
-        logger.debug(
-            f"Collecting {collection_type} metadata from {len(self.host_managers)} host(s)..."
-        )
+        logger.debug(f"Collecting {collection_type} metadata from {len(self.host_managers)} host(s)...")
 
         # Collect metadata from all hosts
         all_host_metadata = {}
@@ -380,14 +366,10 @@ class BisectMaster:
             logger.debug(f"  Collecting from {hostname}...")
 
             # Call bash function to collect metadata
-            ret, stdout, stderr = host_manager.ssh.call_function(
-                "collect_metadata", collection_type, timeout=host_manager.ssh_connect_timeout
-            )
+            ret, stdout, stderr = host_manager.ssh.call_function("collect_metadata", collection_type, timeout=host_manager.ssh_connect_timeout)
 
             if ret != 0:
-                logger.warning(
-                    f"  Failed to collect {collection_type} metadata from {hostname}: {stderr}"
-                )
+                logger.warning(f"  Failed to collect {collection_type} metadata from {hostname}: {stderr}")
                 all_host_metadata[hostname] = {"error": stderr, "status": "failed"}
                 continue
 
@@ -405,9 +387,7 @@ class BisectMaster:
             logger.warning(f"Failed to collect {collection_type} metadata from any host")
             return False
 
-        logger.debug(
-            f"  ✓ Collected metadata from {success_count}/{len(self.host_managers)} host(s)"
-        )
+        logger.debug(f"  ✓ Collected metadata from {success_count}/{len(self.host_managers)} host(s)")
 
         # Create multihost metadata structure
         multihost_metadata = {
@@ -422,16 +402,12 @@ class BisectMaster:
             metadata_list = self.state.get_session_metadata(self.session_id, collection_type)
             if metadata_list:
                 # Find metadata for this iteration
-                iteration_metadata = [
-                    m for m in metadata_list if m.get("iteration_id") == iteration_id
-                ]
+                iteration_metadata = [m for m in metadata_list if m.get("iteration_id") == iteration_id]
                 if iteration_metadata:
                     # Update existing placeholder record instead of creating new one
                     metadata_id = iteration_metadata[0]["metadata_id"]
                     self.state.update_metadata(metadata_id, multihost_metadata)
-                    logger.debug(
-                        f"✓ Updated existing {collection_type} metadata record (id: {metadata_id})"
-                    )
+                    logger.debug(f"✓ Updated existing {collection_type} metadata record (id: {metadata_id})")
                     return True
 
         # No existing record found - create new one
@@ -445,9 +421,7 @@ class BisectMaster:
 
         return True
 
-    def capture_kernel_config(
-        self, kernel_version: str, iteration_id: int, host_manager: Optional[HostManager] = None
-    ) -> bool:
+    def capture_kernel_config(self, kernel_version: str, iteration_id: int, host_manager: Optional[HostManager] = None) -> bool:
         """Capture and store kernel config file(s) from host(s) in database.
 
         Reads the .config file from the kernel build directory (KERNEL_PATH/.config)
@@ -473,9 +447,7 @@ class BisectMaster:
             config_path = f"{kernel_path}/.config"
 
             # Download config file content from host (to memory, not disk)
-            ret, stdout, stderr = hm.ssh.run_command(
-                f"cat {config_path}", timeout=hm.ssh_connect_timeout
-            )
+            ret, stdout, stderr = hm.ssh.run_command(f"cat {config_path}", timeout=hm.ssh_connect_timeout)
 
             if ret != 0:
                 logger.warning(f"  [{hostname}] Failed to read kernel config: {stderr}")
@@ -520,9 +492,7 @@ class BisectMaster:
                 host_id=self.host_managers[0].host_id,
                 kernel_version=kernel_version,
             )
-            logger.info(
-                f"✓ Captured kernel configs from {success_count}/{len(hosts_to_capture)} host(s) (metadata_id: {metadata_id})"
-            )
+            logger.info(f"✓ Captured kernel configs from {success_count}/{len(hosts_to_capture)} host(s) (metadata_id: {metadata_id})")
             return True
         except Exception as exc:
             logger.error(f"Failed to store kernel configs in database: {exc}")
@@ -581,9 +551,7 @@ class BisectMaster:
                 logger.info(f"Cloning repository from {self.config.kernel_repo_source}...")
                 clone_cmd = ["git", "clone", self.config.kernel_repo_source, str(repo_path)]
 
-                result = subprocess.run(
-                    clone_cmd, capture_output=True, text=True, timeout=3600, check=False
-                )
+                result = subprocess.run(clone_cmd, capture_output=True, text=True, timeout=3600, check=False)
 
                 if result.returncode != 0:
                     logger.error(f"Failed to clone repository: {result.stderr}")
@@ -604,9 +572,7 @@ class BisectMaster:
                 )
 
                 if result.returncode != 0:
-                    logger.warning(
-                        f"Failed to checkout branch {self.config.kernel_repo_branch}: {result.stderr}"
-                    )
+                    logger.warning(f"Failed to checkout branch {self.config.kernel_repo_branch}: {result.stderr}")
                 else:
                     logger.info(f"✓ Checked out branch {self.config.kernel_repo_branch}")
 
@@ -666,16 +632,12 @@ class BisectMaster:
             logger.info(f"\n[{i}/{len(self.host_managers)}] Transferring to {hostname}...")
 
             # Remove existing kernel path
-            ret, _stdout, stderr = host_manager.ssh.run_command(
-                f"rm -rf {shlex.quote(kernel_path)}", timeout=host_manager.ssh_connect_timeout
-            )
+            ret, _stdout, stderr = host_manager.ssh.run_command(f"rm -rf {shlex.quote(kernel_path)}", timeout=host_manager.ssh_connect_timeout)
             if ret != 0:
                 logger.warning(f"  Failed to remove existing path (may not exist): {stderr}")
 
             # Create target directory
-            ret, _stdout, stderr = host_manager.ssh.run_command(
-                f"mkdir -p {shlex.quote(kernel_path)}", timeout=host_manager.ssh_connect_timeout
-            )
+            ret, _stdout, stderr = host_manager.ssh.run_command(f"mkdir -p {shlex.quote(kernel_path)}", timeout=host_manager.ssh_connect_timeout)
             if ret != 0:
                 logger.error(f"  Failed to create target directory: {stderr}")
                 all_success = False
@@ -695,9 +657,7 @@ class BisectMaster:
             ]
 
             try:
-                result = subprocess.run(
-                    rsync_cmd, capture_output=True, text=True, timeout=3600, check=False
-                )
+                result = subprocess.run(rsync_cmd, capture_output=True, text=True, timeout=3600, check=False)
 
                 if result.returncode != 0:
                     logger.error(f"  Repository transfer failed: {result.stderr}")
@@ -716,17 +676,13 @@ class BisectMaster:
 
                 # Configure git safe.directory before any git operations
                 if not self._configure_git_safe_directory(host_manager):
-                    logger.warning(
-                        f"  Failed to configure git safe.directory on {host_manager.config.hostname}"
-                    )
+                    logger.warning(f"  Failed to configure git safe.directory on {host_manager.config.hostname}")
 
                 # Clean up and regenerate Git index (prevents corruption from partial rsync)
                 # Remove any existing index files and let Git recreate them
                 logger.debug(f"  Regenerating Git index on {hostname}...")
                 ret, _stdout, stderr = host_manager.ssh.run_command(
-                    f"cd {shlex.quote(kernel_path)} && "
-                    f"rm -f .git/index .git/index.lock && "
-                    f"git reset --hard HEAD",
+                    f"cd {shlex.quote(kernel_path)} && rm -f .git/index .git/index.lock && git reset --hard HEAD",
                     timeout=host_manager.ssh_connect_timeout,
                 )
                 if ret != 0:
@@ -887,9 +843,7 @@ class BisectMaster:
         # Initialize git bisect (use first host since all share same git state)
         logger.info("Initializing git bisect...")
         ret, _stdout, stderr = first_host.ssh.run_command(
-            f"cd {shlex.quote(kernel_path)} && "
-            f"git bisect reset >/dev/null 2>&1; "
-            f"git bisect start {shlex.quote(self.bad_commit)} {shlex.quote(self.good_commit)}",
+            f"cd {shlex.quote(kernel_path)} && git bisect reset >/dev/null 2>&1; git bisect start {shlex.quote(self.bad_commit)} {shlex.quote(self.good_commit)}",
             timeout=first_host.ssh_connect_timeout,
         )
 
@@ -927,13 +881,9 @@ class BisectMaster:
                     remote_dir = script_info["remote_dir"]
 
                     # Create remote directory
-                    ret, _stdout, stderr = hm.ssh.run_command(
-                        f"mkdir -p {shlex.quote(remote_dir)}", timeout=hm.ssh_connect_timeout
-                    )
+                    ret, _stdout, stderr = hm.ssh.run_command(f"mkdir -p {shlex.quote(remote_dir)}", timeout=hm.ssh_connect_timeout)
                     if ret != 0:
-                        logger.error(
-                            f"Failed to create test script directory on {hm.config.hostname}: {stderr}"
-                        )
+                        logger.error(f"Failed to create test script directory on {hm.config.hostname}: {stderr}")
                         return False
 
                     # Transfer script using SCP via subprocess
@@ -956,32 +906,22 @@ class BisectMaster:
                         )
 
                         if result.returncode != 0:
-                            logger.error(
-                                f"Failed to transfer test script to {hm.config.hostname}: {result.stderr}"
-                            )
+                            logger.error(f"Failed to transfer test script to {hm.config.hostname}: {result.stderr}")
                             return False
 
                         # Make script executable
-                        ret, _stdout, stderr = hm.ssh.run_command(
-                            f"chmod +x {shlex.quote(remote_path)}", timeout=hm.ssh_connect_timeout
-                        )
+                        ret, _stdout, stderr = hm.ssh.run_command(f"chmod +x {shlex.quote(remote_path)}", timeout=hm.ssh_connect_timeout)
                         if ret != 0:
-                            logger.error(
-                                f"Failed to make test script executable on {hm.config.hostname}: {stderr}"
-                            )
+                            logger.error(f"Failed to make test script executable on {hm.config.hostname}: {stderr}")
                             return False
 
-                        logger.info(
-                            f"  ✓ Transferred test script to {hm.config.hostname}: {remote_path}"
-                        )
+                        logger.info(f"  ✓ Transferred test script to {hm.config.hostname}: {remote_path}")
 
                     except subprocess.TimeoutExpired:
                         logger.error(f"Test script transfer to {hm.config.hostname} timed out")
                         return False
                     except Exception as exc:
-                        logger.error(
-                            f"Error transferring test script to {hm.config.hostname}: {exc}"
-                        )
+                        logger.error(f"Error transferring test script to {hm.config.hostname}: {exc}")
                         return False
 
         # Transfer kernel configs if they're local files
@@ -995,13 +935,9 @@ class BisectMaster:
                     remote_dir = config_info["remote_dir"]
 
                     # Create remote directory
-                    ret, _stdout, stderr = hm.ssh.run_command(
-                        f"mkdir -p {shlex.quote(remote_dir)}", timeout=hm.ssh_connect_timeout
-                    )
+                    ret, _stdout, stderr = hm.ssh.run_command(f"mkdir -p {shlex.quote(remote_dir)}", timeout=hm.ssh_connect_timeout)
                     if ret != 0:
-                        logger.error(
-                            f"Failed to create kernel config directory on {hm.config.hostname}: {stderr}"
-                        )
+                        logger.error(f"Failed to create kernel config directory on {hm.config.hostname}: {stderr}")
                         return False
 
                     # Transfer config using SCP via subprocess
@@ -1024,22 +960,16 @@ class BisectMaster:
                         )
 
                         if result.returncode != 0:
-                            logger.error(
-                                f"Failed to transfer kernel config to {hm.config.hostname}: {result.stderr}"
-                            )
+                            logger.error(f"Failed to transfer kernel config to {hm.config.hostname}: {result.stderr}")
                             return False
 
-                        logger.info(
-                            f"  ✓ Transferred kernel config to {hm.config.hostname}: {remote_path}"
-                        )
+                        logger.info(f"  ✓ Transferred kernel config to {hm.config.hostname}: {remote_path}")
 
                     except subprocess.TimeoutExpired:
                         logger.error(f"Kernel config transfer to {hm.config.hostname} timed out")
                         return False
                     except Exception as exc:
-                        logger.error(
-                            f"Error transferring kernel config to {hm.config.hostname}: {exc}"
-                        )
+                        logger.error(f"Error transferring kernel config to {hm.config.hostname}: {exc}")
                         return False
 
         # Collect baseline metadata if enabled (use first host)
@@ -1120,9 +1050,7 @@ class BisectMaster:
         kernel_path = first_host.config.kernel_path
 
         logger.debug(f"Executing: cd {kernel_path} && {bisect_cmd}")
-        ret, stdout, stderr = first_host.ssh.run_command(
-            f"cd {shlex.quote(kernel_path)} && {bisect_cmd}", timeout=first_host.ssh_connect_timeout
-        )
+        ret, stdout, stderr = first_host.ssh.run_command(f"cd {shlex.quote(kernel_path)} && {bisect_cmd}", timeout=first_host.ssh_connect_timeout)
 
         if ret != 0:
             # Tier 1: Check for git index corruption (recoverable)
@@ -1138,7 +1066,7 @@ class BisectMaster:
                 logger.info("Attempting automatic recovery...")
 
                 # Call fix_git_index_corruption bash function
-                ret_fix, stdout_fix, stderr_fix = first_host.ssh.call_function(
+                ret_fix, _, stderr_fix = first_host.ssh.call_function(
                     "fix_git_index_corruption",
                     kernel_path,
                     timeout=first_host.ssh_connect_timeout,
@@ -1151,10 +1079,8 @@ class BisectMaster:
                     # Clean working directory to match build_kernel() flow
                     # Step 1: Discard all tracked file changes with git reset --hard HEAD
                     # Step 2: Remove untracked files with git clean -fd
-                    ret_clean, stdout_clean, stderr_clean = first_host.ssh.run_command(
-                        f"cd {shlex.quote(kernel_path)} && "
-                        f"git reset --hard HEAD && "
-                        f"git clean -fd",
+                    ret_clean, _, stderr_clean = first_host.ssh.run_command(
+                        f"cd {shlex.quote(kernel_path)} && git reset --hard HEAD && git clean -fd",
                         timeout=first_host.ssh_connect_timeout,
                     )
 
@@ -1212,9 +1138,7 @@ class BisectMaster:
                 logger.error("=" * 70)
                 logger.error("")
                 logger.error("What this means:")
-                logger.error(
-                    "  The common ancestor (merge base) of your commits already has the bug."
-                )
+                logger.error("  The common ancestor (merge base) of your commits already has the bug.")
                 logger.error("  This makes it impossible to bisect between them.")
                 logger.error("")
                 logger.error("Your commits:")
@@ -1302,15 +1226,12 @@ class BisectMaster:
             if "No such file or directory" in stderr and ("cd:" in stderr or kernel_path in stderr):
                 return (
                     False,
-                    f"Kernel directory does not exist: {kernel_path}\n"
-                    f"This error should have been caught earlier - please report this bug.\n"
-                    f"Git error: {stderr.strip()}",
+                    f"Kernel directory does not exist: {kernel_path}\nThis error should have been caught earlier - please report this bug.\nGit error: {stderr.strip()}",
                 )
             else:
                 return (
                     False,
-                    f"Good commit '{self.good_commit}' does not exist in the repository.\n"
-                    f"Git error: {stderr.strip()}",
+                    f"Good commit '{self.good_commit}' does not exist in the repository.\nGit error: {stderr.strip()}",
                 )
 
         good_full = stdout.strip()
@@ -1327,15 +1248,12 @@ class BisectMaster:
             if "No such file or directory" in stderr and ("cd:" in stderr or kernel_path in stderr):
                 return (
                     False,
-                    f"Kernel directory does not exist: {kernel_path}\n"
-                    f"This error should have been caught earlier - please report this bug.\n"
-                    f"Git error: {stderr.strip()}",
+                    f"Kernel directory does not exist: {kernel_path}\nThis error should have been caught earlier - please report this bug.\nGit error: {stderr.strip()}",
                 )
             else:
                 return (
                     False,
-                    f"Bad commit '{self.bad_commit}' does not exist in the repository.\n"
-                    f"Git error: {stderr.strip()}",
+                    f"Bad commit '{self.bad_commit}' does not exist in the repository.\nGit error: {stderr.strip()}",
                 )
 
         bad_full = stdout.strip()
@@ -1345,8 +1263,7 @@ class BisectMaster:
         if good_full == bad_full:
             return (
                 False,
-                f"Good and bad commits are the same: {good_full}\n"
-                "Bisection requires two different commits.",
+                f"Good and bad commits are the same: {good_full}\nBisection requires two different commits.",
             )
 
         # Step 3: Check if commits have a valid merge base (common ancestor)
@@ -1359,10 +1276,7 @@ class BisectMaster:
             # No merge base found - commits are truly unrelated
             return (
                 False,
-                f"Good and bad commits have no common ancestor.\n"
-                f"This means they are on completely unrelated histories.\n\n"
-                f"For bisection to work, commits must share a common ancestor.\n"
-                f"Git error: {stderr.strip()}",
+                f"Good and bad commits have no common ancestor.\nThis means they are on completely unrelated histories.\n\nFor bisection to work, commits must share a common ancestor.\nGit error: {stderr.strip()}",
             )
 
         merge_base = stdout.strip()
@@ -1417,9 +1331,7 @@ class BisectMaster:
     # Per-Host Helper Methods (for multi-host bisection)
     # ===========================================================================
 
-    def _build_on_host(
-        self, host_manager: HostManager, commit_sha: str, iteration_id: int
-    ) -> Tuple[bool, int, Optional[int], Optional[str]]:
+    def _build_on_host(self, host_manager: HostManager, commit_sha: str, iteration_id: int) -> Tuple[bool, int, Optional[int], Optional[str]]:
         """Build kernel on a specific host.
 
         Args:
@@ -1431,9 +1343,7 @@ class BisectMaster:
             Tuple of (success, exit_code, log_id, kernel_version)
         """
         hostname = host_manager.config.hostname
-        logger.info(
-            f"  [{hostname}] Building kernel for commit {commit_sha[:SHORT_COMMIT_LENGTH]}..."
-        )
+        logger.info(f"  [{hostname}] Building kernel for commit {commit_sha[:SHORT_COMMIT_LENGTH]}...")
 
         # Get kernel config path (already resolved to remote path during __init__)
         # Both per-host and global configs are transferred and set in host_manager.config.kernel_config_file
@@ -1445,9 +1355,7 @@ class BisectMaster:
         log_header += f"Config: {kernel_config or 'default'}\n\n"
         log_header += "=== BUILD OUTPUT ===\n"
 
-        log_id = self.state.create_build_log(
-            iteration_id, "build", log_header, host_id=host_manager.host_id
-        )
+        log_id = self.state.create_build_log(iteration_id, "build", log_header, host_id=host_manager.host_id)
 
         # Streaming state
         buffer = []
@@ -1541,9 +1449,7 @@ class BisectMaster:
 
         return (len(missing_hosts) == 0, missing_hosts)
 
-    def _verify_kernel_boot(
-        self, host_manager: HostManager, expected_kernel_ver: str, actual_kernel_ver: str
-    ) -> Tuple[bool, Optional[str]]:
+    def _verify_kernel_boot(self, host_manager: HostManager, expected_kernel_ver: str, actual_kernel_ver: str) -> Tuple[bool, Optional[str]]:
         """Verify that the expected kernel actually booted.
 
         Args:
@@ -1562,20 +1468,12 @@ class BisectMaster:
             return True, None
 
         # Kernel mismatch detected
-        error_msg = (
-            f"Boot verification failed - wrong kernel booted\n"
-            f"  Expected: {expected_kernel_ver}\n"
-            f"  Actual:   {actual_kernel_ver}\n"
-            f"  Likely cause: Test kernel panicked or failed to boot, "
-            f"system fell back to protected kernel"
-        )
+        error_msg = f"Boot verification failed - wrong kernel booted\n  Expected: {expected_kernel_ver}\n  Actual:   {actual_kernel_ver}\n  Likely cause: Test kernel panicked or failed to boot, system fell back to protected kernel"
 
         logger.error(f"[{host_manager.config.hostname}] ✗ {error_msg}")
         return False, error_msg
 
-    def _reboot_host(
-        self, host_manager: HostManager, _iteration_id: int, expected_kernel_ver: Optional[str]
-    ) -> Tuple[bool, Optional[str], Optional[str]]:
+    def _reboot_host(self, host_manager: HostManager, _iteration_id: int, expected_kernel_ver: Optional[str]) -> Tuple[bool, Optional[str], Optional[str]]:
         """Reboot a specific host and verify kernel.
 
         Args:
@@ -1591,9 +1489,7 @@ class BisectMaster:
 
         # Use power controller if available, otherwise fall back to SSH reboot
         if host_manager.power_controller:
-            logger.info(
-                f"  [{hostname}] Using {host_manager.config.power_control_type} power control for reboot"
-            )
+            logger.info(f"  [{hostname}] Using {host_manager.config.power_control_type} power control for reboot")
             if not host_manager.power_controller.reset():
                 logger.error(f"  [{hostname}] Power controller reset failed")
                 return False, None, "Power controller reset failed"
@@ -1606,9 +1502,7 @@ class BisectMaster:
         time.sleep(DEFAULT_REBOOT_SETTLE_TIME)
 
         # Wait for slave to come back online
-        logger.debug(
-            f"[{hostname}] Waiting for host to come back online (timeout: {host_manager.boot_timeout}s)..."
-        )
+        logger.debug(f"[{hostname}] Waiting for host to come back online (timeout: {host_manager.boot_timeout}s)...")
         boot_start = time.time()
 
         while not host_manager.ssh.is_alive():
@@ -1621,18 +1515,14 @@ class BisectMaster:
         time.sleep(DEFAULT_POST_BOOT_SETTLE_TIME)
 
         # Verify which kernel booted
-        ret, actual_kernel_ver, _ = host_manager.ssh.run_command(
-            "uname -r", timeout=host_manager.ssh_connect_timeout
-        )
+        ret, actual_kernel_ver, _ = host_manager.ssh.run_command("uname -r", timeout=host_manager.ssh_connect_timeout)
         if ret == 0:
             actual_kernel_ver = actual_kernel_ver.strip()
             logger.info(f"  [{hostname}] Booted kernel: {actual_kernel_ver}")
 
             # Verify expected kernel booted
             if expected_kernel_ver:
-                verified, error_msg = self._verify_kernel_boot(
-                    host_manager, expected_kernel_ver, actual_kernel_ver
-                )
+                verified, error_msg = self._verify_kernel_boot(host_manager, expected_kernel_ver, actual_kernel_ver)
 
                 if not verified:
                     # Boot verification failed - wrong kernel
@@ -1664,9 +1554,7 @@ class BisectMaster:
         log_header += f"Timeout: {host_manager.test_timeout}s\n\n"
         log_header += "=== TEST OUTPUT ===\n"
 
-        log_id = self.state.create_build_log(
-            iteration_id, "test", log_header, host_id=host_manager.host_id
-        )
+        log_id = self.state.create_build_log(iteration_id, "test", log_header, host_id=host_manager.host_id)
 
         # Streaming state
         buffer = []
@@ -1734,9 +1622,7 @@ class BisectMaster:
     # Phase Extraction Methods
     # ===========================================================================
 
-    def _validate_commit_phase(
-        self, commit_sha: str, iteration: "BisectIteration"
-    ) -> Tuple[bool, bool]:
+    def _validate_commit_phase(self, commit_sha: str, iteration: "BisectIteration") -> Tuple[bool, bool]:
         """Phase 0: Validate commit exists on all hosts.
 
         Args:
@@ -1764,9 +1650,7 @@ class BisectMaster:
         logger.debug(f"✓ Commit {commit_sha[:7]} exists on all hosts")
         return (True, False)
 
-    def _build_phase(
-        self, commit_sha: str, iteration_id: int, iteration: "BisectIteration"
-    ) -> Tuple[bool, dict, bool]:
+    def _build_phase(self, commit_sha: str, iteration_id: int, iteration: "BisectIteration") -> Tuple[bool, dict, bool]:
         """Phase 1: Build kernel on all hosts in parallel.
 
         Args:
@@ -1784,12 +1668,7 @@ class BisectMaster:
         # Add 10% buffer to configured timeout for parallel execution overhead
         overall_timeout = self.config.build_timeout * 1.1
         with ThreadPoolExecutor() as executor:
-            futures = {
-                executor.submit(
-                    self._build_on_host, host_manager, commit_sha, iteration_id
-                ): host_manager
-                for host_manager in self.host_managers
-            }
+            futures = {executor.submit(self._build_on_host, host_manager, commit_sha, iteration_id): host_manager for host_manager in self.host_managers}
 
             try:
                 for future in as_completed(futures, timeout=overall_timeout):
@@ -1829,9 +1708,7 @@ class BisectMaster:
                 # Ensure error message is populated even if build failed without exception
                 error_msg = result_data.get("error")
                 if not error_msg and not result_data.get("success"):
-                    error_msg = (
-                        f"Build failed with exit code {result_data.get('exit_code', 'unknown')}"
-                    )
+                    error_msg = f"Build failed with exit code {result_data.get('exit_code', 'unknown')}"
 
                 bulk_results.append(
                     {
@@ -1855,9 +1732,7 @@ class BisectMaster:
         logger.info("✓ All hosts built successfully")
         return (True, build_results, False)
 
-    def _reboot_phase(
-        self, iteration_id: int, build_results: dict, commit_sha: str, iteration: "BisectIteration"
-    ) -> Tuple[bool, dict, bool]:
+    def _reboot_phase(self, iteration_id: int, build_results: dict, commit_sha: str, iteration: "BisectIteration") -> Tuple[bool, dict, bool]:
         """Phase 2: Reboot all hosts in parallel.
 
         Args:
@@ -1881,9 +1756,7 @@ class BisectMaster:
                     self._reboot_host,
                     host_manager,
                     iteration_id,
-                    build_results[host_manager.host_id].get(
-                        "kernel_ver"
-                    ),  # Use .get() to handle missing key
+                    build_results[host_manager.host_id].get("kernel_ver"),  # Use .get() to handle missing key
                 ): host_manager
                 for host_manager in self.host_managers
             }
@@ -1914,9 +1787,7 @@ class BisectMaster:
 
         # Check if any reboot failed
         if not all(r.get("success", False) for r in reboot_results.values()):
-            logger.error(
-                "One or more hosts failed to reboot or boot verification failed - marking iteration SKIP"
-            )
+            logger.error("One or more hosts failed to reboot or boot verification failed - marking iteration SKIP")
 
             # Aggregate error messages for better diagnostics
             errors = []
@@ -1955,9 +1826,7 @@ class BisectMaster:
         logger.info("✓ All hosts rebooted successfully")
         return (True, reboot_results, False)
 
-    def _test_and_aggregate_phase(
-        self, iteration_id: int, commit_sha: str, iteration: "BisectIteration"
-    ) -> bool:
+    def _test_and_aggregate_phase(self, iteration_id: int, commit_sha: str, iteration: "BisectIteration") -> bool:
         """Phase 3 & 4: Run tests on all hosts and aggregate results.
 
         Args:
@@ -1975,10 +1844,7 @@ class BisectMaster:
         # Add 10% buffer to configured timeout for parallel execution overhead
         overall_timeout = self.config.test_timeout * 1.1
         with ThreadPoolExecutor() as executor:
-            futures = {
-                executor.submit(self._test_on_host, host_manager, iteration_id): host_manager
-                for host_manager in self.host_managers
-            }
+            futures = {executor.submit(self._test_on_host, host_manager, iteration_id): host_manager for host_manager in self.host_managers}
 
             try:
                 for future in as_completed(futures, timeout=overall_timeout):
@@ -2036,11 +1902,7 @@ class BisectMaster:
         elif any(r == TestResult.BAD for r in all_results):
             final_result = TestResult.BAD
             # Show which hosts failed
-            failed_hosts = [
-                host_manager.config.hostname
-                for host_manager in self.host_managers
-                if test_results[host_manager.host_id]["result"] == TestResult.BAD
-            ]
+            failed_hosts = [host_manager.config.hostname for host_manager in self.host_managers if test_results[host_manager.host_id]["result"] == TestResult.BAD]
             logger.error(f"✗ Failed on: {', '.join(failed_hosts)} - marking commit BAD")
         else:
             final_result = TestResult.SKIP
@@ -2058,17 +1920,12 @@ class BisectMaster:
         # Mark in git bisect
         success, bisection_complete = self.mark_commit(commit_sha, final_result)
         if not success:
-            logger.error(
-                "Failed to mark commit in git bisect - bisection state may be inconsistent"
-            )
+            logger.error("Failed to mark commit in git bisect - bisection state may be inconsistent")
             logger.error("")
             logger.error("STOPPING BISECTION - Please fix the issue and restart")
             logger.error("")
             # Raise exception to stop bisection
-            raise RuntimeError(
-                "Git bisect failed to mark commit. "
-                "See error messages above for details."
-            )
+            raise RuntimeError("Git bisect failed to mark commit. See error messages above for details.")
 
         return bisection_complete
 
@@ -2076,9 +1933,7 @@ class BisectMaster:
     # End of Phase Extraction Methods
     # ===========================================================================
 
-    def _run_multihost_iteration(
-        self, iteration: BisectIteration, iteration_id: int, commit_sha: str
-    ) -> Tuple[BisectIteration, bool]:
+    def _run_multihost_iteration(self, iteration: BisectIteration, iteration_id: int, commit_sha: str) -> Tuple[BisectIteration, bool]:
         """Run iteration in multi-host mode with parallel execution.
 
         Args:
@@ -2098,16 +1953,12 @@ class BisectMaster:
                 return (iteration, bisection_complete)
 
             # Phase 1: Build
-            phase_ok, build_results, bisection_complete = self._build_phase(
-                commit_sha, iteration_id, iteration
-            )
+            phase_ok, build_results, bisection_complete = self._build_phase(commit_sha, iteration_id, iteration)
             if not phase_ok:
                 return (iteration, bisection_complete)
 
             # Phase 2: Reboot
-            phase_ok, _reboot_results, bisection_complete = self._reboot_phase(
-                iteration_id, build_results, commit_sha, iteration
-            )
+            phase_ok, _reboot_results, bisection_complete = self._reboot_phase(iteration_id, build_results, commit_sha, iteration)
             if not phase_ok:
                 return (iteration, bisection_complete)
 
@@ -2145,9 +1996,7 @@ class BisectMaster:
                 iteration.duration = int((end - start).total_seconds())
 
                 # Persist duration to database
-                self.state.update_iteration(
-                    iteration_id, end_time=iteration.end_time, duration=iteration.duration
-                )
+                self.state.update_iteration(iteration_id, end_time=iteration.end_time, duration=iteration.duration)
 
             self.iterations.append(iteration)
             self.save_state()
@@ -2175,9 +2024,7 @@ class BisectMaster:
         commit_msg = commit_msg.strip() if ret == 0 else "Unknown"
 
         # Create iteration in database
-        iteration_id = self.state.create_iteration(
-            self.session_id, self.iteration_count, commit_sha, commit_msg
-        )
+        iteration_id = self.state.create_iteration(self.session_id, self.iteration_count, commit_sha, commit_msg)
 
         iteration = BisectIteration(
             iteration=self.iteration_count,
@@ -2208,8 +2055,7 @@ class BisectMaster:
         kernel_path = first_host.config.kernel_path
 
         ret, stdout, _ = first_host.ssh.run_command(
-            f"cd {shlex.quote(kernel_path)} && "
-            "git bisect log | grep 'first bad commit' -A 1 | grep '^commit' | head -1 | awk '{print $2}'",
+            f"cd {shlex.quote(kernel_path)} && git bisect log | grep 'first bad commit' -A 1 | grep '^commit' | head -1 | awk '{{print $2}}'",
             timeout=first_host.ssh_connect_timeout,
         )
 
@@ -2243,9 +2089,7 @@ class BisectMaster:
 
             # Safety check: prevent infinite loops
             if iteration_count > MAX_ITERATIONS:
-                logger.error(
-                    f"SAFETY LIMIT REACHED: Exceeded {MAX_ITERATIONS} iterations. Bisection may be stuck in an infinite loop. Stopping."
-                )
+                logger.error(f"SAFETY LIMIT REACHED: Exceeded {MAX_ITERATIONS} iterations. Bisection may be stuck in an infinite loop. Stopping.")
                 self.state.update_session(
                     self.session_id,
                     status="failed",
@@ -2263,17 +2107,10 @@ class BisectMaster:
             # Check if we're stuck on the same commit
             if commit == previous_commit:
                 same_commit_count += 1
-                logger.warning(
-                    f"Still on same commit {commit[:8]} (attempt {same_commit_count}/{MAX_SAME_COMMIT})"
-                )
+                logger.warning(f"Still on same commit {commit[:8]} (attempt {same_commit_count}/{MAX_SAME_COMMIT})")
 
                 if same_commit_count >= MAX_SAME_COMMIT:
-                    logger.error(
-                        f"STUCK ON SAME COMMIT: Git bisect has returned the same commit {commit[:8]} "
-                        f"for {same_commit_count} consecutive iterations. This indicates git bisect "
-                        f"has run out of viable commits to test, or there's a problem with the repository state. "
-                        f"Stopping bisection."
-                    )
+                    logger.error(f"STUCK ON SAME COMMIT: Git bisect has returned the same commit {commit[:8]} for {same_commit_count} consecutive iterations. This indicates git bisect has run out of viable commits to test, or there's a problem with the repository state. Stopping bisection.")
                     self.state.update_session(
                         self.session_id,
                         status="failed",
@@ -2333,9 +2170,7 @@ class BisectMaster:
 
         # Bisection completed (no more commits to test)
         # Update session status if not already done
-        self.state.update_session(
-            self.session_id, status="completed", end_time=datetime.utcnow().isoformat()
-        )
+        self.state.update_session(self.session_id, status="completed", end_time=datetime.utcnow().isoformat())
 
         self.generate_report()
         return True
@@ -2363,9 +2198,7 @@ class BisectMaster:
             "good_commit": self.good_commit,
             "bad_commit": self.bad_commit,
             "iteration_count": self.iteration_count,
-            "current_iteration": (
-                self._iteration_to_dict(self.current_iteration) if self.current_iteration else None
-            ),
+            "current_iteration": (self._iteration_to_dict(self.current_iteration) if self.current_iteration else None),
             "iterations": [self._iteration_to_dict(it) for it in self.iterations],
             "last_update": datetime.utcnow().isoformat(),
         }
@@ -2392,9 +2225,7 @@ class BisectMaster:
         for iteration in self.iterations:
             status = iteration.result.value if iteration.result else "unknown"
             duration = f"{iteration.duration}s" if iteration.duration else "N/A"
-            logger.info(
-                f"{iteration.iteration:3d}. {iteration.commit_short} | {status:7s} | {duration:6s} | {iteration.commit_message[:50]}"
-            )
+            logger.info(f"{iteration.iteration:3d}. {iteration.commit_short} | {status:7s} | {duration:6s} | {iteration.commit_message[:50]}")
 
         # Get final result from git bisect (use first host)
         first_host = self.host_managers[0]
@@ -2519,9 +2350,7 @@ class BisectMaster:
             print("\nPossible solutions:")
             print("  1. Ensure all hosts have the latest commits: git fetch origin")
             print("  2. Check that kernel_path in bisect.yaml points to the correct repository")
-            print(
-                f"  3. Verify the commit exists in your repository: git log --oneline | grep {commit_full[:SHORT_COMMIT_LENGTH]}"
-            )
+            print(f"  3. Verify the commit exists in your repository: git log --oneline | grep {commit_full[:SHORT_COMMIT_LENGTH]}")
             logger.error(f"Commit validation failed on hosts: {', '.join(missing_hosts)}")
             return False
 
@@ -2532,9 +2361,7 @@ class BisectMaster:
         session_id = None
         if save_logs:
             # Create temporary session for build-only (use dummy commits)
-            session_id = self.state.create_session(
-                good_commit="build-only", bad_commit=commit_full[:SHORT_COMMIT_LENGTH]
-            )
+            session_id = self.state.create_session(good_commit="build-only", bad_commit=commit_full[:SHORT_COMMIT_LENGTH])
             iteration_id = self.state.create_iteration(session_id, 1, commit_full, commit_msg)
             logger.info(f"Saving logs to database (session_id={session_id})")
         else:
@@ -2547,12 +2374,7 @@ class BisectMaster:
         overall_timeout = self.config.build_timeout * 1.1
 
         with ThreadPoolExecutor() as executor:
-            futures = {
-                executor.submit(
-                    self._build_on_host, host_manager, commit_full, iteration_id
-                ): host_manager
-                for host_manager in self.host_managers
-            }
+            futures = {executor.submit(self._build_on_host, host_manager, commit_full, iteration_id): host_manager for host_manager in self.host_managers}
 
             try:
                 for future in as_completed(futures, timeout=overall_timeout):
@@ -2646,9 +2468,7 @@ class BisectMaster:
             hostname = host_manager.config.hostname
             logger.info(f"  Installing dependencies on {hostname}...")
 
-            ret, _stdout, stderr = host_manager.ssh.call_function(
-                "install_build_deps", timeout=host_manager.ssh_connect_timeout
-            )
+            ret, _stdout, stderr = host_manager.ssh.call_function("install_build_deps", timeout=host_manager.ssh_connect_timeout)
 
             if ret != 0:
                 logger.warning(f"  Failed to install build dependencies on {hostname}: {stderr}")
@@ -2725,14 +2545,10 @@ class BisectMaster:
             error_msg = stderr.strip()
 
             # Detect common issues and provide helpful hints
-            if "No such file or directory" in error_msg and (
-                "cd:" in error_msg or kernel_path in error_msg
-            ):
+            if "No such file or directory" in error_msg and ("cd:" in error_msg or kernel_path in error_msg):
                 logger.error(f"Kernel directory does not exist: {kernel_path}")
                 logger.error(f"Host: {first_host.config.hostname}")
-                logger.error(
-                    "This shouldn't happen after auto-initialization - please report this issue"
-                )
+                logger.error("This shouldn't happen after auto-initialization - please report this issue")
             elif "not a git repository" in error_msg.lower():
                 logger.error(f"Not a git repository: {kernel_path}")
                 logger.error("Please ensure the kernel_path points to a valid git repository")
