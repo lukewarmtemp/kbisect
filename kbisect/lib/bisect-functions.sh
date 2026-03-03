@@ -501,20 +501,47 @@ build_kernel() {
         return 1
     }
 
-    # Ensure certs directory exists and create dummy RHEL PEM to bypass module signing.
-    mkdir -p certs
-    openssl req -new -x509 -days 365 -nodes -out certs/rhel.pem -keyout certs/rhel.pem -subj "/CN=localhost" >&2 || {
-        echo "Warning: openssl failed, build may fail if certs/rhel.pem is required" >&2
+    # Always disable distro-provided key references (e.g. certs/rhel.pem is not in public source).
+    if [ -x scripts/config ]; then
+        ./scripts/config --set-str SYSTEM_TRUSTED_KEYS "" --set-str SYSTEM_REVOCATION_KEYS "" 2>/dev/null || true
+    fi
+    if grep -q '^CONFIG_SYSTEM_TRUSTED_KEYS=' .config 2>/dev/null; then
+        sed -i 's/^CONFIG_SYSTEM_TRUSTED_KEYS=.*/CONFIG_SYSTEM_TRUSTED_KEYS=""/' .config 2>/dev/null || true
+    else
+        echo 'CONFIG_SYSTEM_TRUSTED_KEYS=""' >> .config
+    fi
+    if grep -q '^CONFIG_SYSTEM_REVOCATION_KEYS=' .config 2>/dev/null; then
+        sed -i 's/^CONFIG_SYSTEM_REVOCATION_KEYS=.*/CONFIG_SYSTEM_REVOCATION_KEYS=""/' .config 2>/dev/null || true
+    else
+        echo 'CONFIG_SYSTEM_REVOCATION_KEYS=""' >> .config
+    fi
+    # Re-sync config after forced key changes.
+    make olddefconfig >&2 || {
+        git restore Makefile
+        return 1
     }
 
-    # Create dummy kernel.sbat to bypass SBAT build
-    echo "dummy SBAT" > kernel.sbat
-
-    # Clean previous build artifacts to avoid stale files
+    # Clean previous build artifacts to avoid stale files (do this before creating certs/sbat
+    # so the kernel clean target does not remove them)
     make clean >&2 || {
         git restore Makefile
         return 1
     }
+
+    # Ensure certs directory exists and create dummy RHEL PEM (backup if config still references it).
+    mkdir -p certs
+    if ! openssl req -new -x509 -days 365 -nodes -out certs/rhel.pem -keyout certs/rhel.pem -subj "/CN=localhost" >&2; then
+        echo "Warning: openssl failed, creating placeholder certs/rhel.pem" >&2
+        printf '%s\n' '-----BEGIN CERTIFICATE-----' 'MIIBkTCB+wIJAK' '-----END CERTIFICATE-----' > certs/rhel.pem 2>/dev/null || true
+    fi
+    [ -f certs/rhel.pem ] || echo "Warning: certs/rhel.pem not created (SYSTEM_TRUSTED_KEYS should be disabled above)" >&2
+
+    # Create dummy kernel.sbat to bypass SBAT build
+    echo "dummy SBAT" > kernel.sbat
+
+    # Print key config/cert state for troubleshooting certs target failures.
+    grep -E '^CONFIG_SYSTEM_(TRUSTED_KEYS|REVOCATION_KEYS)=' .config >&2 || true
+    [ -f certs/rhel.pem ] && echo "certs/rhel.pem present" >&2 || echo "certs/rhel.pem missing" >&2
 
     # Build kernel and modules using all CPU cores
     make -j$(nproc) >&2 || {

@@ -1435,7 +1435,51 @@ class BisectMaster:
         elapsed = int(time.time() - start_time)
 
         if ret != 0:
-            logger.error(f"  [{hostname}] Build FAILED in {elapsed // 60}m {elapsed % 60}s")
+            logger.error(f"  [{hostname}] Build FAILED in {elapsed // 60}m {elapsed % 60}s (exit code {ret})")
+            # Prefer showing lines that look like errors, then a short tail
+            combined = (stdout or "") + (_stderr or "")
+            if not combined.strip():
+                log_data = self.state.get_build_log(log_id)
+                if log_data and log_data.get("content"):
+                    combined = log_data["content"]
+            if combined.strip():
+                lines = combined.rstrip().split("\n")
+                # Prefer make-style failure lines (e.g. "make: *** [Makefile:1960: drivers] Error 2")
+                make_style = ("make:", "make[", "***", "error 1", "error 2", "stop.", "no rule to make")
+                make_error_indices = [i for i, ln in enumerate(lines) if any(s in ln.lower() for s in make_style)]
+                # Fallback: any line that looks like an error
+                any_error_indices = [i for i, ln in enumerate(lines) if any(s in ln.lower() for s in ("error", "***", "failed", "fatal"))]
+                error_indices = make_error_indices if make_error_indices else any_error_indices
+                if error_indices:
+                    last_error_idx = error_indices[-1]
+                    start = max(0, last_error_idx - 49)
+                    error_excerpt = "\n".join(lines[start : last_error_idx + 1])
+                    tail_excerpt = "\n".join(lines[-25:]) if len(lines) > 25 else "\n".join(lines)
+                    logger.error(f"  [{hostname}] Build error excerpt:\n{error_excerpt}")
+                    logger.error(f"  [{hostname}] Build output (last 25 lines):\n{tail_excerpt}")
+                else:
+                    # No error in captured output; try full build log from DB (may have more than SSH return)
+                    log_data = self.state.get_build_log(log_id)
+                    if log_data and log_data.get("content"):
+                        log_lines = log_data["content"].rstrip().split("\n")
+                        log_make = [i for i, ln in enumerate(log_lines) if any(s in ln.lower() for s in make_style)]
+                        log_any = [i for i, ln in enumerate(log_lines) if any(s in ln.lower() for s in ("error", "***", "failed", "fatal"))]
+                        log_errors = log_make if log_make else log_any
+                        if log_errors:
+                            last_idx = log_errors[-1]
+                            start = max(0, last_idx - 49)
+                            error_excerpt = "\n".join(log_lines[start : last_idx + 1])
+                            tail_excerpt = "\n".join(log_lines[-25:]) if len(log_lines) > 25 else "\n".join(log_lines)
+                            logger.error(f"  [{hostname}] Build error excerpt (from full log):\n{error_excerpt}")
+                            logger.error(f"  [{hostname}] Build output (last 25 lines):\n{tail_excerpt}")
+                        else:
+                            tail_lines = 80
+                            excerpt = "\n".join(log_lines[-tail_lines:]) if len(log_lines) > tail_lines else "\n".join(log_lines)
+                            logger.error(f"  [{hostname}] Build output (last {min(tail_lines, len(log_lines))} lines). Full log: kbisect logs show {log_id}\n{excerpt}")
+                    else:
+                        tail_lines = 80
+                        excerpt = "\n".join(lines[-tail_lines:]) if len(lines) > tail_lines else "\n".join(lines)
+                        logger.error(f"  [{hostname}] Build output (last {min(tail_lines, len(lines))} lines). Full log: kbisect logs show {log_id}\n{excerpt}")
             return False, ret, log_id, None
 
         logger.info(f"  [{hostname}] Build OK in {elapsed // 60}m {elapsed % 60}s")
