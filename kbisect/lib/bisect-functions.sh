@@ -489,13 +489,38 @@ build_kernel() {
         fi
     fi
 
-    # Ensure we have a default config if missing
+    # Ensure we have a config if missing.
+    # Prefer distro config generation for RHEL/CentOS source trees.
     if [ ! -f .config ]; then
-        echo "No .config found, running defconfig..." >&2
-        make defconfig >&2 || {
-            git restore Makefile
-            return 1
-        }
+        local arch_name
+        arch_name="$(uname -m)"
+        local generated_cfg=""
+
+        echo "No .config found, trying dist-configs..." >&2
+        if make dist-configs >&2; then
+            # Common locations for generated distro configs.
+            for generated_cfg in \
+                "SOURCES/kernel-${arch_name}-rhel.config" \
+                "configs/kernel-${arch_name}-rhel.config" \
+                "redhat/configs/kernel-${arch_name}-rhel.config"
+            do
+                if [ -f "$generated_cfg" ]; then
+                    echo "Using dist-configs output: $generated_cfg" >&2
+                    cp "$generated_cfg" .config
+                    break
+                fi
+            done
+        else
+            echo "dist-configs not available or failed; falling back to defconfig" >&2
+        fi
+
+        if [ ! -f .config ]; then
+            echo "No dist-config output found, running defconfig..." >&2
+            make defconfig >&2 || {
+                git restore Makefile
+                return 1
+            }
+        fi
     fi
 
     # Build kernel (olddefconfig uses .config as base if it exists, handles new options)
@@ -602,9 +627,43 @@ build_kernel() {
         return 1
     fi
 
-    # Get kernel version
-    local kernel_version=$(make kernelrelease 2>/dev/null)
+    # Get kernel version. Some distro trees may report a generic kernelrelease
+    # (e.g. 5.14.0+) even though install created a labeled bisect kernel.
+    local kernel_version
+    kernel_version=$(make kernelrelease 2>/dev/null)
     local bootfile="/boot/vmlinuz-${kernel_version}"
+
+    # Prefer the installed bisect-labeled kernel for boot selection.
+    if [ -z "$kernel_version" ] || [[ "$kernel_version" != *"$label"* ]] || [ ! -f "$bootfile" ]; then
+        local detected_kernel_version=""
+        local modules_path=""
+        for modules_path in /lib/modules/*"$label"*; do
+            [ -d "$modules_path" ] || continue
+            detected_kernel_version="${modules_path##*/}"
+            break
+        done
+        if [ -n "$detected_kernel_version" ]; then
+            kernel_version="$detected_kernel_version"
+            bootfile="/boot/vmlinuz-${kernel_version}"
+        fi
+    fi
+
+    # Final fallback: derive version from /boot image filename containing label.
+    if [ ! -f "$bootfile" ]; then
+        local boot_path=""
+        for boot_path in /boot/vmlinuz-*"$label"*; do
+            [ -f "$boot_path" ] || continue
+            bootfile="$boot_path"
+            kernel_version="${boot_path#/boot/vmlinuz-}"
+            break
+        done
+    fi
+    if [ ! -f "$bootfile" ]; then
+        echo "ERROR: Cannot locate installed boot image for bisect kernel" >&2
+        echo "  Label: $label" >&2
+        echo "  kernelrelease: ${kernel_version:-<empty>}" >&2
+        return 1
+    fi
 
     # Add panic=5 parameter for auto-reboot on kernel panic
     # If test kernel panics, it will automatically reboot after 5 seconds

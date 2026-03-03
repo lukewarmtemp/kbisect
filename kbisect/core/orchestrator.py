@@ -1063,6 +1063,15 @@ class BisectMaster:
         first_host = self.host_managers[0]
         kernel_path = first_host.config.kernel_path
 
+        # Best-effort cleanup of stale build artifacts that can block bisect checkout
+        # after interrupted builds/reboots.
+        first_host.ssh.run_command(
+            f"cd {shlex.quote(kernel_path)} && "
+            "git restore Makefile >/dev/null 2>&1 || true; "
+            "rm -f Makefile.bisect-backup >/dev/null 2>&1 || true",
+            timeout=first_host.ssh_connect_timeout,
+        )
+
         logger.debug(f"Executing: cd {kernel_path} && {bisect_cmd}")
         ret, stdout, stderr = first_host.ssh.run_command(f"cd {shlex.quote(kernel_path)} && {bisect_cmd}", timeout=first_host.ssh_connect_timeout)
 
@@ -1186,13 +1195,42 @@ class BisectMaster:
 
             # Tier 3: Generic git bisect failure
             else:
-                logger.error(f"Failed to mark commit: {stderr}")
-                logger.error("")
-                logger.error("This may be due to:")
-                logger.error("  - Incorrect bisect range (commits swapped or invalid)")
-                logger.error("  - Git repository issues")
-                logger.error("  - Filesystem or permission problems")
-                return (False, False)
+                if (
+                    "local changes" in stderr.lower()
+                    and "makefile" in stderr.lower()
+                    and "would be overwritten by checkout" in stderr.lower()
+                ):
+                    logger.warning("Detected stale Makefile changes; attempting automatic cleanup and retry...")
+                    ret_clean, _, stderr_clean = first_host.ssh.run_command(
+                        f"cd {shlex.quote(kernel_path)} && "
+                        "git restore Makefile && rm -f Makefile.bisect-backup && git reset --hard HEAD && git clean -fd",
+                        timeout=first_host.ssh_connect_timeout,
+                    )
+                    if ret_clean != 0:
+                        logger.warning(f"Automatic cleanup reported issues: {stderr_clean}")
+                    ret_retry, stdout_retry, stderr_retry = first_host.ssh.run_command(
+                        f"cd {shlex.quote(kernel_path)} && {bisect_cmd}",
+                        timeout=first_host.ssh_connect_timeout,
+                    )
+                    if ret_retry == 0:
+                        stdout = stdout_retry
+                        stderr = stderr_retry
+                        ret = 0
+                    else:
+                        logger.error(f"Retry after cleanup failed: {stderr_retry}")
+                        return (False, False)
+
+                if ret == 0:
+                    # Retry succeeded and outputs were updated.
+                    pass
+                else:
+                    logger.error(f"Failed to mark commit: {stderr}")
+                    logger.error("")
+                    logger.error("This may be due to:")
+                    logger.error("  - Incorrect bisect range (commits swapped or invalid)")
+                    logger.error("  - Git repository issues")
+                    logger.error("  - Filesystem or permission problems")
+                    return (False, False)
 
         # Check if bisection just completed
         # Git bisect outputs "<sha> is the first bad commit" when it successfully finds the culprit
@@ -1464,7 +1502,54 @@ class BisectMaster:
 
         if ret != 0:
             logger.error(f"  [{hostname}] Build FAILED in {elapsed // 60}m {elapsed % 60}s (exit code {ret})")
-            # Prefer showing lines that look like errors, then a short tail
+            # Prefer showing real compiler/linker errors, then make wrapper errors.
+            def _log_error_excerpts(src_lines: List[str], source_label: str = "") -> bool:
+                make_style = ("make:", "make[", "***", "error 1", "error 2", "stop.", "no rule to make")
+                compiler_style = (
+                    ": error:",
+                    " error:",
+                    "fatal error",
+                    "undefined reference",
+                    "multiple definition",
+                    "collect2:",
+                    "ld:",
+                    "ld.lld:",
+                    "cannot find ",
+                    "no such file or directory",
+                )
+
+                lower_lines = [ln.lower() for ln in src_lines]
+                make_error_indices = [i for i, ln in enumerate(lower_lines) if any(s in ln for s in make_style)]
+                compiler_error_indices = [
+                    i
+                    for i, ln in enumerate(lower_lines)
+                    if any(s in ln for s in compiler_style) and "make:" not in ln and "make[" not in ln
+                ]
+
+                found = False
+                label_suffix = f" ({source_label})" if source_label else ""
+
+                if compiler_error_indices:
+                    found = True
+                    idx = compiler_error_indices[-1]
+                    start = max(0, idx - 30)
+                    end = min(len(src_lines), idx + 20)
+                    excerpt = "\n".join(src_lines[start:end])
+                    logger.error(f"  [{hostname}] Compiler/linker error excerpt{label_suffix}:\n{excerpt}")
+
+                if make_error_indices:
+                    found = True
+                    idx = make_error_indices[-1]
+                    start = max(0, idx - 20)
+                    excerpt = "\n".join(src_lines[start : idx + 1])
+                    logger.error(f"  [{hostname}] make failure excerpt{label_suffix}:\n{excerpt}")
+
+                if found:
+                    tail_excerpt = "\n".join(src_lines[-25:]) if len(src_lines) > 25 else "\n".join(src_lines)
+                    logger.error(f"  [{hostname}] Build output (last 25 lines):\n{tail_excerpt}")
+
+                return found
+
             combined = (stdout or "") + (_stderr or "")
             if not combined.strip():
                 log_data = self.state.get_build_log(log_id)
@@ -1472,42 +1557,25 @@ class BisectMaster:
                     combined = log_data["content"]
             if combined.strip():
                 lines = combined.rstrip().split("\n")
-                # Prefer make-style failure lines (e.g. "make: *** [Makefile:1960: drivers] Error 2")
-                make_style = ("make:", "make[", "***", "error 1", "error 2", "stop.", "no rule to make")
-                make_error_indices = [i for i, ln in enumerate(lines) if any(s in ln.lower() for s in make_style)]
-                # Fallback: any line that looks like an error
-                any_error_indices = [i for i, ln in enumerate(lines) if any(s in ln.lower() for s in ("error", "***", "failed", "fatal"))]
-                error_indices = make_error_indices if make_error_indices else any_error_indices
-                if error_indices:
-                    last_error_idx = error_indices[-1]
-                    start = max(0, last_error_idx - 49)
-                    error_excerpt = "\n".join(lines[start : last_error_idx + 1])
-                    tail_excerpt = "\n".join(lines[-25:]) if len(lines) > 25 else "\n".join(lines)
-                    logger.error(f"  [{hostname}] Build error excerpt:\n{error_excerpt}")
-                    logger.error(f"  [{hostname}] Build output (last 25 lines):\n{tail_excerpt}")
-                else:
-                    # No error in captured output; try full build log from DB (may have more than SSH return)
+                if not _log_error_excerpts(lines):
+                    # No clear error in captured output; try full build log from DB.
                     log_data = self.state.get_build_log(log_id)
                     if log_data and log_data.get("content"):
                         log_lines = log_data["content"].rstrip().split("\n")
-                        log_make = [i for i, ln in enumerate(log_lines) if any(s in ln.lower() for s in make_style)]
-                        log_any = [i for i, ln in enumerate(log_lines) if any(s in ln.lower() for s in ("error", "***", "failed", "fatal"))]
-                        log_errors = log_make if log_make else log_any
-                        if log_errors:
-                            last_idx = log_errors[-1]
-                            start = max(0, last_idx - 49)
-                            error_excerpt = "\n".join(log_lines[start : last_idx + 1])
-                            tail_excerpt = "\n".join(log_lines[-25:]) if len(log_lines) > 25 else "\n".join(log_lines)
-                            logger.error(f"  [{hostname}] Build error excerpt (from full log):\n{error_excerpt}")
-                            logger.error(f"  [{hostname}] Build output (last 25 lines):\n{tail_excerpt}")
-                        else:
+                        if not _log_error_excerpts(log_lines, "from full log"):
                             tail_lines = 80
                             excerpt = "\n".join(log_lines[-tail_lines:]) if len(log_lines) > tail_lines else "\n".join(log_lines)
-                            logger.error(f"  [{hostname}] Build output (last {min(tail_lines, len(log_lines))} lines). Full log: kbisect logs show {log_id}\n{excerpt}")
+                            logger.error(
+                                f"  [{hostname}] Build output (last {min(tail_lines, len(log_lines))} lines). "
+                                f"Full log: kbisect logs show {log_id}\n{excerpt}"
+                            )
                     else:
                         tail_lines = 80
                         excerpt = "\n".join(lines[-tail_lines:]) if len(lines) > tail_lines else "\n".join(lines)
-                        logger.error(f"  [{hostname}] Build output (last {min(tail_lines, len(lines))} lines). Full log: kbisect logs show {log_id}\n{excerpt}")
+                        logger.error(
+                            f"  [{hostname}] Build output (last {min(tail_lines, len(lines))} lines). "
+                            f"Full log: kbisect logs show {log_id}\n{excerpt}"
+                        )
             return False, ret, log_id, None
 
         logger.info(f"  [{hostname}] Build OK in {elapsed // 60}m {elapsed % 60}s")
