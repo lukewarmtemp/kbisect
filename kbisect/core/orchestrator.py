@@ -1352,6 +1352,31 @@ class BisectMaster:
     # Per-Host Helper Methods (for multi-host bisection)
     # ===========================================================================
 
+    def _sync_remote_bisect_library(self, host_manager: HostManager) -> bool:
+        """Sync latest local bisect-functions.sh to the remote host.
+
+        This prevents stale remote libraries when local code changes during development.
+        """
+        hostname = host_manager.config.hostname
+        local_lib = Path(__file__).resolve().parent.parent / "lib" / "bisect-functions.sh"
+        remote_lib = f"{host_manager.config.bisect_path.rstrip('/')}/bisect-functions.sh"
+
+        if not local_lib.exists():
+            logger.warning(f"[{hostname}] Local library not found: {local_lib}")
+            return False
+
+        if not host_manager.ssh.copy_file(str(local_lib), remote_lib):
+            logger.warning(f"[{hostname}] Failed to sync library to {remote_lib}")
+            return False
+
+        ret, _, stderr = host_manager.ssh.run_command(f"chmod +x {shlex.quote(remote_lib)}")
+        if ret != 0:
+            logger.warning(f"[{hostname}] Failed to chmod remote library: {stderr}")
+            return False
+
+        logger.debug(f"[{hostname}] Synced remote library: {remote_lib}")
+        return True
+
     def _build_on_host(self, host_manager: HostManager, commit_sha: str, iteration_id: int) -> Tuple[bool, int, Optional[int], Optional[str]]:
         """Build kernel on a specific host.
 
@@ -1365,6 +1390,9 @@ class BisectMaster:
         """
         hostname = host_manager.config.hostname
         logger.info(f"  [{hostname}] Building kernel for commit {commit_sha[:SHORT_COMMIT_LENGTH]}...")
+
+        # Keep remote library in sync with local code before each build.
+        self._sync_remote_bisect_library(host_manager)
 
         # Get kernel config path (already resolved to remote path during __init__)
         # Both per-host and global configs are transferred and set in host_manager.config.kernel_config_file

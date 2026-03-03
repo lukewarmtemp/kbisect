@@ -474,6 +474,9 @@ build_kernel() {
 
     # Backup and modify Makefile
     cp Makefile Makefile.bisect-backup
+    # Always restore Makefile backup on function return (success, failure, or interruption).
+    # Self-clear the trap so it does not affect other functions.
+    trap 'git restore Makefile >/dev/null 2>&1 || true; rm -f Makefile.bisect-backup >/dev/null 2>&1 || true; trap - RETURN' RETURN
     sed -i "s/^EXTRAVERSION =.*/EXTRAVERSION = -$label/" Makefile
 
     # Copy base kernel config if specified
