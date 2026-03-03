@@ -486,13 +486,42 @@ build_kernel() {
         fi
     fi
 
+    # Ensure we have a default config if missing
+    if [ ! -f .config ]; then
+        echo "No .config found, running defconfig..." >&2
+        make defconfig >&2 || {
+            git restore Makefile
+            return 1
+        }
+    fi
+
     # Build kernel (olddefconfig uses .config as base if it exists, handles new options)
     make olddefconfig >&2 || {
         git restore Makefile
         return 1
     }
 
+    # Ensure certs directory exists and create dummy RHEL PEM to bypass module signing.
+    mkdir -p certs
+    openssl req -new -x509 -days 365 -nodes -out certs/rhel.pem -keyout certs/rhel.pem -subj "/CN=localhost" >&2 || {
+        echo "Warning: openssl failed, build may fail if certs/rhel.pem is required" >&2
+    }
+
+    # Create dummy kernel.sbat to bypass SBAT build
+    echo "dummy SBAT" > kernel.sbat
+
+    # Clean previous build artifacts to avoid stale files
+    make clean >&2 || {
+        git restore Makefile
+        return 1
+    }
+
+    # Build kernel and modules using all CPU cores
     make -j$(nproc) >&2 || {
+        git restore Makefile
+        return 1
+    }
+    make modules -j$(nproc) >&2 || {
         git restore Makefile
         return 1
     }
