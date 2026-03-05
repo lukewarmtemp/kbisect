@@ -476,16 +476,7 @@ build_kernel() {
     cp Makefile Makefile.bisect-backup
     sed -i "s/^EXTRAVERSION =.*/EXTRAVERSION = -$label/" Makefile
 
-    # Fix unused variable issue in vgic-v4.c before compilation   
-    if [ -f arch/arm64/kvm/vgic/vgic-v4.c ]; then
-        # Fix all occurrences of 'int ret = 0;' in the entire file
-        sed -i 's/int ret = 0;/int ret __attribute__((unused)) = 0;/g' arch/arm64/kvm/vgic/vgic-v4.c
-        sync
-    else
-        echo "ERROR: vgic-v4.c file not found!" >&2
-    fi
-
-    Copy base kernel config if specified
+    # Copy base kernel config if specified
     if [ -n "$kernel_config" ]; then
         if [ -f "$kernel_config" ]; then
             echo "Using kernel config: $kernel_config" >&2
@@ -495,92 +486,73 @@ build_kernel() {
         fi
     fi
 
-    # ---------------------------
-    # 1. Extract running config
-    # ---------------------------
-    # echo "[+] Using running kernel config as base"
-    # if [[ -f /proc/config.gz ]]; then
-    #     zcat /proc/config.gz > .config
-    # elif [[ -f /boot/config-$(uname -r) ]]; then
-    #     cp /boot/config-$(uname -r) .config
-    # else
-    #     echo "ERROR: cannot find running kernel config (/proc/config.gz or /boot/config-$(uname -r))" >&2
-    #     exit 1
-    # fi
-    # # ---------------------------
-    # 2. Sync config with source tree
-    # ---------------------------
+    # Fill in missing config defaults
+    make olddefconfig >&2 || {
+        git restore Makefile
+        return 1
+    }
 
-    # perl -pi -e 's/=m/=y/' .config
+    # Disable RHEL signing keys that only exist in RPM builds
+    sed -i 's|CONFIG_SYSTEM_TRUSTED_KEYS=.*|CONFIG_SYSTEM_TRUSTED_KEYS=""|' .config
+    sed -i 's|CONFIG_SYSTEM_REVOCATION_KEYS=.*|CONFIG_SYSTEM_REVOCATION_KEYS=""|' .config
 
-    echo "[+] Validating config against this commit's Kconfig"
+    # Disable module signing
+    if [ -x "scripts/config" ]; then
+        scripts/config --disable MODULE_SIG || {
+            git restore Makefile
+            return 1
+        }
+        scripts/config --disable MODULE_SIG_ALL || {
+            git restore Makefile
+            return 1
+        }
+        scripts/config --disable SYSTEM_TRUSTED_KEYRING || {
+            git restore Makefile
+            return 1
+        }
+    else
+        echo "Warning: scripts/config not found or not executable; skipping module signing toggles" >&2
+    fi
 
-    # This automatically:
-    #  - adds new symbols with Kconfig defaults
-    #  - removes deleted symbols
-    #  - resolves renamed ones if Kconfig provides migration
-    #  - prevents stale options from corrupting init
-    yes "" | make ARCH=arm64 oldconfig
+    # Regenerate config
+    make olddefconfig >&2 || {
+        git restore Makefile
+        return 1
+    }
 
-    # ---------------------------
-    # 3. Optional: Report dropped or invalid symbols
-    # ---------------------------
-    # echo "[+] Detecting dropped / invalid symbols"
-    # make listnewconfig || true   # lists new settings requiring attention
-    # make oldnoconfig   || true   # lists removed symbols
+    # Files commonly expected by RHEL RPM-oriented build hooks
+    mkdir -p certs
+    touch certs/rhel.pem
+    touch certs/signing_key.pem
+    touch kernel.sbat
 
-    scripts/config --file .config --enable CONFIG_EFI || true
-    scripts/config --file .config --enable CONFIG_EFI_STUB || true
-    scripts/config --file .config --enable CONFIG_BLK_DEV_INITRD || true
-    scripts/config --file .config --enable CONFIG_ARM_SMMU || true
-    scripts/config --file .config --enable CONFIG_ARM_SMMU_V3 || true
-    scripts/config --file .config --enable CONFIG_IKCONFIG || true
-    scripts/config --file .config --enable CONFIG_IKCONFIG_PROC || true
-    # If your root is NVMe/SCSI, make sure they are present as builtin or modules:
-    scripts/config --file .config --enable CONFIG_BLK_DEV_LOOP || true
-    # prefer module for NVMe/SCSI in the initramfs if you rely on dracut to include them
-    scripts/config --file .config --module CONFIG_NVME_CORE || true
-    scripts/config --file .config --module CONFIG_NVME || true
-    scripts/config --file .config --module CONFIG_SCSI || true
-    scripts/config --file .config --module CONFIG_BLK_DEV_SD || true
+    # Prevent common GCC flag issues
+    export KCFLAGS="-Wno-error"
+    local jobs
+    jobs="$(nproc)"
 
-    yes "" | make ARCH=arm64 oldconfig
+    # Build kernel
+    make -j"$jobs" >&2 || {
+        git restore Makefile
+        return 1
+    }
 
-    # Build kernel (olddefconfig uses .config as base if it exists, handles new options)
-    # make olddefconfig >&2 || {
-    #     git restore Makefile
-    #     return 1
-    # }
-
-    make -j$(nproc) ARCH=arm64 KCFLAGS="-Wno-error=unused-variable -Wno-error=unused-but-set-variable -Wno-error=unused-function" >&2 || {
+    # Build modules
+    make modules -j"$jobs" >&2 || {
         git restore Makefile
         return 1
     }
 
     # Install
-    make modules_install ARCH=arm64 >&2 || {
+    make modules_install >&2 || {
         git restore Makefile
         return 1
     }
 
-    make install ARCH=arm64>&2 || {
+    make install >&2 || {
         git restore Makefile
         return 1
     }
-
-
-    # ---------------------------
-    # 6. Rebuild initramfs for the new kernel
-    # ---------------------------
-    KVER=$(make -s ARCH=arm64 kernelrelease)
-    echo "[+] Rebuilding initramfs (force include nvme, scsi) for $KVER"
-    sudo dracut --force --kver "$KVER" --add "lvm" --add "ssh"  \
-        --include /etc/modprobe.d /etc/modprobe.d 2>/dev/null || {
-        # fallback to plain rebuild if --add fails
-        sudo dracut -f /boot/initramfs-"${KVER}".img "${KVER}"
-    }
-
-    sync
 
     # Update GRUB
     if command -v grub2-mkconfig &> /dev/null; then
@@ -690,15 +662,9 @@ build_kernel() {
         return 1
     fi
 
-    # Restore Makefile and any modified source files
+    # Restore Makefile
     git restore Makefile
     rm -f Makefile.bisect-backup
-    
-    # Restore vgic-v4.c to clean state (undo our compilation fix)
-    if [ -f arch/arm64/kvm/vgic/vgic-v4.c ]; then
-        git checkout arch/arm64/kvm/vgic/vgic-v4.c
-        echo "✓ Restored vgic-v4.c to original state" >&2
-    fi
 
     # Output kernel version (for master to capture)
     echo "$kernel_version"
