@@ -1620,20 +1620,29 @@ class BisectMaster:
                     f"[{hostname}] Exception starting console collector: {exc} (non-fatal)"
                 )
 
-        # Use power controller if available, otherwise fall back to SSH reboot
-        if host_manager.power_controller:
-            logger.info(f"  [{hostname}] Using {host_manager.config.power_control_type} power control for reboot")
-            if not host_manager.power_controller.reset():
-                logger.error(f"  [{hostname}] Power controller reset failed")
+        # Prefer graceful reboot via SSH first (with sync) so grubenv one-time
+        # entry is reliably persisted and consumed on the next boot.
+        reboot_cmd = "nohup sh -c 'sync; sleep 1; systemctl reboot || reboot' >/dev/null 2>&1 &"
+        logger.info(f"  [{hostname}] Triggering graceful reboot via SSH")
+        ret, _stdout, stderr = host_manager.ssh.run_command(reboot_cmd, timeout=host_manager.ssh_connect_timeout)
 
-                # Stop and store console log on failure
+        if ret != 0:
+            if host_manager.power_controller:
+                logger.warning(
+                    f"  [{hostname}] SSH reboot command failed ({stderr.strip() or 'unknown error'}), "
+                    f"falling back to {host_manager.config.power_control_type} reset"
+                )
+                if not host_manager.power_controller.reset():
+                    logger.error(f"  [{hostname}] Power controller reset failed")
+
+                    # Stop and store console log on failure
+                    self._stop_and_store_console_log(host_manager, iteration_id)
+
+                    return False, None, "Both SSH reboot and power controller reset failed"
+            else:
+                logger.error(f"  [{hostname}] SSH reboot command failed: {stderr.strip() or 'unknown error'}")
                 self._stop_and_store_console_log(host_manager, iteration_id)
-
-                return False, None, "Power controller reset failed"
-        else:
-            logger.info(f"  [{hostname}] Using SSH reboot command")
-            # Send reboot command via SSH
-            host_manager.ssh.run_command("reboot", timeout=5)
+                return False, None, "SSH reboot command failed"
 
         # Wait for reboot to start
         time.sleep(DEFAULT_REBOOT_SETTLE_TIME)
