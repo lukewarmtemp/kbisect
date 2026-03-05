@@ -486,13 +486,59 @@ build_kernel() {
         fi
     fi
 
-    # Build kernel (olddefconfig uses .config as base if it exists, handles new options)
+    # Fill in missing config defaults
     make olddefconfig >&2 || {
         git restore Makefile
         return 1
     }
 
-    make -j$(nproc) >&2 || {
+    # Disable RHEL signing keys that only exist in RPM builds
+    sed -i 's|CONFIG_SYSTEM_TRUSTED_KEYS=.*|CONFIG_SYSTEM_TRUSTED_KEYS=""|' .config
+    sed -i 's|CONFIG_SYSTEM_REVOCATION_KEYS=.*|CONFIG_SYSTEM_REVOCATION_KEYS=""|' .config
+
+    # Disable module signing
+    if [ -x "scripts/config" ]; then
+        scripts/config --disable MODULE_SIG || {
+            git restore Makefile
+            return 1
+        }
+        scripts/config --disable MODULE_SIG_ALL || {
+            git restore Makefile
+            return 1
+        }
+        scripts/config --disable SYSTEM_TRUSTED_KEYRING || {
+            git restore Makefile
+            return 1
+        }
+    else
+        echo "Warning: scripts/config not found or not executable; skipping module signing toggles" >&2
+    fi
+
+    # Regenerate config
+    make olddefconfig >&2 || {
+        git restore Makefile
+        return 1
+    }
+
+    # Files commonly expected by RHEL RPM-oriented build hooks
+    mkdir -p certs
+    touch certs/rhel.pem
+    touch certs/signing_key.pem
+    touch kernel.sbat
+
+    # Prevent common GCC flag issues
+    export KCFLAGS="-Wno-error"
+    local jobs
+    jobs="$(nproc)"
+
+    # Build kernel
+    make -j"$jobs" >&2 || {
+        git restore Makefile
+        return 1
+    }
+
+    # Build modules
+    make modules -j"$jobs" >&2 || {
         git restore Makefile
         return 1
     }
