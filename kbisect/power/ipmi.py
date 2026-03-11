@@ -109,6 +109,8 @@ class IPMIController(PowerController):
                 "ipmitool",
                 "-I",
                 "lanplus",
+                "-C",
+                "3",
                 "-H",
                 self.host,
                 "-U",
