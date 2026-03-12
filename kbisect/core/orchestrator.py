@@ -25,6 +25,7 @@ if TYPE_CHECKING:
 
 from kbisect.collectors import create_console_collector
 from kbisect.config.config import BisectConfig, HostConfig
+from kbisect.power.base import BootDevice
 from kbisect.remote import SSHClient
 
 
@@ -1623,6 +1624,10 @@ class BisectMaster:
         # Use power controller if available, otherwise fall back to SSH reboot
         if host_manager.power_controller:
             logger.info(f"  [{hostname}] Using {host_manager.config.power_control_type} power control for reboot")
+            # Ensure one-time boot from local disk before reset to avoid PXE/UEFI shell
+            # fall-through on platforms with fragile firmware boot order.
+            if not host_manager.power_controller.set_boot_device(BootDevice.DISK, persistent=False):
+                logger.warning(f"  [{hostname}] Failed to set one-time boot device to disk before reset")
             if not host_manager.power_controller.reset():
                 logger.error(f"  [{hostname}] Power controller reset failed")
 
@@ -1704,6 +1709,10 @@ class BisectMaster:
             return False
 
         logger.info(f"  [{hostname}] Attempting host recovery via power cycle...")
+
+        # Force one-time disk boot before recovery operations.
+        if not host_manager.power_controller.set_boot_device(BootDevice.DISK, persistent=False):
+            logger.warning(f"  [{hostname}] Failed to set one-time boot device to disk before recovery")
 
         # Try power_cycle first
         try:
