@@ -25,6 +25,7 @@ if TYPE_CHECKING:
 
 from kbisect.collectors import create_console_collector
 from kbisect.config.config import BisectConfig, HostConfig
+from kbisect.power.base import BootDevice
 from kbisect.remote import SSHClient
 
 
@@ -1620,6 +1621,13 @@ class BisectMaster:
                     f"[{hostname}] Exception starting console collector: {exc} (non-fatal)"
                 )
 
+        # If power control is available, proactively force one-time disk boot
+        # for this reboot attempt. This helps avoid PXE/UEFI shell fall-through
+        # even when reboot is triggered via SSH.
+        if host_manager.power_controller:
+            if not host_manager.power_controller.set_boot_device(BootDevice.DISK, persistent=False):
+                logger.warning(f"  [{hostname}] Failed to set one-time boot device to disk before reboot")
+
         # Prefer graceful reboot via SSH first (with sync) so grubenv one-time
         # entry is reliably persisted and consumed on the next boot.
         reboot_cmd = "nohup sh -c 'sync; sleep 1; systemctl reboot || reboot' >/dev/null 2>&1 &"
@@ -1632,6 +1640,9 @@ class BisectMaster:
                     f"  [{hostname}] SSH reboot command failed ({stderr.strip() or 'unknown error'}), "
                     f"falling back to {host_manager.config.power_control_type} reset"
                 )
+                # Ensure reset attempts a one-time local disk boot first.
+                if not host_manager.power_controller.set_boot_device(BootDevice.DISK, persistent=False):
+                    logger.warning(f"  [{hostname}] Failed to set one-time boot device to disk before reset")
                 if not host_manager.power_controller.reset():
                     logger.error(f"  [{hostname}] Power controller reset failed")
 
@@ -1713,6 +1724,10 @@ class BisectMaster:
             return False
 
         logger.info(f"  [{hostname}] Attempting host recovery via power cycle...")
+
+        # Force one-time disk boot before recovery operations.
+        if not host_manager.power_controller.set_boot_device(BootDevice.DISK, persistent=False):
+            logger.warning(f"  [{hostname}] Failed to set one-time boot device to disk before recovery")
 
         # Try power_cycle first
         try:
