@@ -234,7 +234,7 @@ class BeakerController(PowerController):
         )
         return False
 
-    def set_boot_device(self, _device: BootDevice, _persistent: bool = False) -> bool:
+    def set_boot_device(self, _device: BootDevice, persistent: bool = False) -> bool:
         """Set next boot device.
 
         Note: Beaker does not support boot device configuration.
