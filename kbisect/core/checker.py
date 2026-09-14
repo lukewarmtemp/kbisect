@@ -464,7 +464,7 @@ class SystemChecker:
 
         # Per-host checks
         for host_config in self.config.hosts:
-            hostname = host_config["hostname"]
+            hostname = host_config.hostname
             logger.info(f"Checking host: {hostname}")
 
             # SSH connectivity
