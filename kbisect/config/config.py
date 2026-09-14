@@ -62,6 +62,8 @@ class BisectConfig:
         collect_baseline: Collect baseline system metadata
         collect_per_iteration: Collect metadata per iteration
         collect_kernel_config: Collect kernel .config files
+        collect_console_logs: Enable console log collection checks
+        console_collector_type: Default console collector type
         kernel_repo_source: Git URL or local path to kernel repository (optional)
         kernel_repo_branch: Branch or ref to checkout (optional)
     """
@@ -89,6 +91,11 @@ class BisectConfig:
     collect_baseline: bool = True
     collect_per_iteration: bool = True
     collect_kernel_config: bool = True
+
+    # Console log collection.  Keep this disabled by default; console
+    # collection is optional and is configured per host when enabled.
+    collect_console_logs: bool = False
+    console_collector_type: str = "auto"
 
     # Kernel repository (optional automatic deployment)
     kernel_repo_source: Optional[str] = None

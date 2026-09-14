@@ -108,6 +108,7 @@ def create_bisect_config(config_dict: Dict[str, Any], _args: Any) -> BisectConfi
 
     # Get metadata settings from config
     metadata_config = config_dict.get("metadata", {})
+    console_logs_config = config_dict.get("console_logs", {})
 
     # Parse hosts configuration (REQUIRED)
     if "hosts" not in config_dict:
@@ -160,6 +161,11 @@ def create_bisect_config(config_dict: Dict[str, Any], _args: Any) -> BisectConfi
         collect_baseline=metadata_config.get("collect_baseline", True),
         collect_per_iteration=metadata_config.get("collect_per_iteration", True),
         collect_kernel_config=metadata_config.get("collect_kernel_config", True),
+        collect_console_logs=console_logs_config.get(
+            "enabled",
+            any(host.console_enabled for host in hosts),
+        ),
+        console_collector_type=console_logs_config.get("collector", "auto"),
         kernel_repo_source=config_dict.get("kernel_repo", {}).get("source"),
         kernel_repo_branch=config_dict.get("kernel_repo", {}).get("branch"),
     )
