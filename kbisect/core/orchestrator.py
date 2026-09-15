@@ -1636,10 +1636,11 @@ class BisectMaster:
             if not host_manager.power_controller.set_boot_device(BootDevice.DISK, persistent=False):
                 logger.warning(f"  [{hostname}] Failed to set one-time boot device to disk before reboot")
 
-        # Prefer graceful reboot via SSH first (with sync) so grubenv one-time
-        # entry is reliably persisted and consumed on the next boot.
-        reboot_cmd = "nohup sh -c 'sync; sleep 1; systemctl reboot || reboot' >/dev/null 2>&1 &"
-        logger.info(f"  [{hostname}] Triggering graceful reboot via SSH")
+        # Use the Red Hat test-system reboot helper so the reboot is handled
+        # consistently on systems managed by Beaker/RHTS.  Keep it detached
+        # because the SSH session is expected to disappear during reboot.
+        reboot_cmd = "nohup sh -c 'sync; sleep 1; rhts-reboot' >/dev/null 2>&1 &"
+        logger.info(f"  [{hostname}] Triggering reboot via rhts-reboot over SSH")
         ret, _stdout, stderr = host_manager.ssh.run_command(reboot_cmd, timeout=host_manager.ssh_connect_timeout)
 
         if ret != 0:
