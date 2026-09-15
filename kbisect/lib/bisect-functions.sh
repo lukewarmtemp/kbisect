@@ -403,6 +403,38 @@ install_build_deps() {
 # BUILD FUNCTIONS
 # ============================================================================
 
+restore_protected_kernel() {
+    # Make the known-good kernel the permanent default and cancel any pending
+    # one-time boot entry.  This is safe to call after a partial build/install.
+    if [ ! -f "$BISECT_DIR/safe-kernel.info" ]; then
+        echo "⚠ Cannot restore protected kernel: $BISECT_DIR/safe-kernel.info is missing" >&2
+        return 1
+    fi
+
+    source "$BISECT_DIR/safe-kernel.info"
+    if [ -z "${SAFE_KERNEL_IMAGE:-}" ] || [ ! -e "$SAFE_KERNEL_IMAGE" ]; then
+        echo "⚠ Cannot restore protected kernel: ${SAFE_KERNEL_IMAGE:-unknown} is unavailable" >&2
+        return 1
+    fi
+
+    if command -v grubby &> /dev/null; then
+        grubby --set-default="$SAFE_KERNEL_IMAGE" >&2 || return 1
+    fi
+    if command -v grub2-editenv &> /dev/null; then
+        grub2-editenv /boot/grub2/grubenv unset next_entry >&2 2>/dev/null || true
+    elif command -v grub-editenv &> /dev/null; then
+        grub-editenv /boot/grub/grubenv unset next_entry >&2 2>/dev/null || true
+    fi
+    echo "✓ Restored protected kernel as fallback: ${SAFE_KERNEL_VERSION:-$SAFE_KERNEL_IMAGE}" >&2
+    return 0
+}
+
+build_failure() {
+    echo "✗ Kernel build/install failed; restoring protected boot kernel" >&2
+    restore_protected_kernel || echo "⚠ Protected-kernel restoration failed; manual recovery may be required" >&2
+    return 1
+}
+
 build_kernel() {
     local commit="$1"
     local kernel_path="${2:-$KERNEL_PATH}"
@@ -439,19 +471,19 @@ build_kernel() {
             echo "  1. SSH to slave and check /boot contents" >&2
             echo "  2. Manually remove old kernels if needed" >&2
             echo "  3. Verify protected kernel is intact" >&2
-            return 1
+            build_failure
         fi
     fi
 
     echo "" >&2
-    cd "$kernel_path" || return 1
+    cd "$kernel_path" || build_failure
 
     # Fix any Git index corruption before attempting reset
     # Index can become corrupted from interrupted operations or disk issues
     if ! fix_git_index_corruption "$kernel_path"; then
         echo "✗ Failed to fix Git index corruption" >&2
         echo "Manual intervention required: rm -f $kernel_path/.git/index && cd $kernel_path && git reset" >&2
-        return 1
+        build_failure
     fi
 
     # Reset repository to clean state before checkout
@@ -467,7 +499,7 @@ build_kernel() {
     }
 
     # Checkout commit
-    git checkout "$commit" 2>&1 || return 1
+    git checkout "$commit" 2>&1 || build_failure
 
     # Create build label
     local label="bisect-${commit:0:7}"
@@ -489,7 +521,7 @@ build_kernel() {
     # Fill in missing config defaults
     make olddefconfig >&2 || {
         git restore Makefile
-        return 1
+        build_failure
     }
 
     # Disable RHEL signing keys that only exist in RPM builds
@@ -498,17 +530,24 @@ build_kernel() {
 
     # Disable module signing
     if [ -x "scripts/config" ]; then
+        # Root filesystems on the supported RHEL machines are commonly XFS.
+        # Keep XFS as a module and explicitly add it to each bisect initramfs
+        # below so a test kernel can mount /sysroot during early boot.
+        scripts/config --module XFS_FS || {
+            git restore Makefile
+            build_failure
+        }
         scripts/config --disable MODULE_SIG || {
             git restore Makefile
-            return 1
+            build_failure
         }
         scripts/config --disable MODULE_SIG_ALL || {
             git restore Makefile
-            return 1
+            build_failure
         }
         scripts/config --disable SYSTEM_TRUSTED_KEYRING || {
             git restore Makefile
-            return 1
+            build_failure
         }
     else
         echo "Warning: scripts/config not found or not executable; skipping module signing toggles" >&2
@@ -517,7 +556,7 @@ build_kernel() {
     # Regenerate config
     make olddefconfig >&2 || {
         git restore Makefile
-        return 1
+        build_failure
     }
 
     # Files commonly expected by RHEL RPM-oriented build hooks
@@ -534,25 +573,50 @@ build_kernel() {
     # Build kernel
     make -j"$jobs" >&2 || {
         git restore Makefile
-        return 1
+        build_failure
     }
 
     # Build modules
     make modules -j"$jobs" >&2 || {
         git restore Makefile
-        return 1
+        build_failure
     }
 
     # Install
     make modules_install >&2 || {
         git restore Makefile
-        return 1
+        build_failure
     }
 
     make install >&2 || {
         git restore Makefile
-        return 1
+        build_failure
     }
+
+    # kernel-install/dracut may omit XFS from a host-only initramfs when the
+    # newly installed kernel is not currently running.  Force it in so the
+    # root filesystem remains mountable after the one-time bisect boot.
+    local kernel_version
+    kernel_version=$(make kernelrelease 2>/dev/null) || {
+        git restore Makefile
+        build_failure
+    }
+    if ! command -v dracut &> /dev/null; then
+        echo "ERROR: dracut is required to build the bisect initramfs" >&2
+        git restore Makefile
+        build_failure
+    fi
+    if ! dracut --force --add-drivers xfs "/boot/initramfs-${kernel_version}.img" "${kernel_version}" >&2; then
+        echo "ERROR: Failed to add XFS support to initramfs-${kernel_version}.img" >&2
+        git restore Makefile
+        build_failure
+    fi
+    if ! lsinitrd "/boot/initramfs-${kernel_version}.img" 2>/dev/null | grep -qE '(^|/)xfs\.ko([.]|$)'; then
+        echo "ERROR: XFS module is missing from initramfs-${kernel_version}.img" >&2
+        git restore Makefile
+        build_failure
+    fi
+    echo "✓ XFS support confirmed in initramfs-${kernel_version}.img" >&2
 
     # Update GRUB
     if command -v grub2-mkconfig &> /dev/null; then
@@ -571,7 +635,7 @@ build_kernel() {
             if ! grubby --set-default="$SAFE_KERNEL_IMAGE" 2>&1; then
                 echo "ERROR: Failed to restore protected kernel as default" >&2
                 git restore Makefile
-                return 1
+                build_failure
             fi
             local default_kernel=$(grubby --default-kernel 2>/dev/null)
             if [ "$default_kernel" != "$SAFE_KERNEL_IMAGE" ]; then
@@ -579,18 +643,18 @@ build_kernel() {
                 echo "  Expected: $SAFE_KERNEL_IMAGE" >&2
                 echo "  Actual: $default_kernel" >&2
                 git restore Makefile
-                return 1
+                build_failure
             fi
             echo "✓ Protected kernel confirmed as permanent default: $SAFE_KERNEL_VERSION" >&2
         fi
     else
         echo "ERROR: $BISECT_DIR/safe-kernel.info not found - protection not initialized" >&2
         git restore Makefile
-        return 1
+        build_failure
     fi
 
     # Get kernel version
-    local kernel_version=$(make kernelrelease 2>/dev/null)
+    kernel_version=$(make kernelrelease 2>/dev/null)
     local bootfile="/boot/vmlinuz-${kernel_version}"
 
     # Add panic=5 parameter for auto-reboot on kernel panic
@@ -616,7 +680,7 @@ build_kernel() {
             echo "  Kernel: $kernel_version" >&2
             echo "  Boot file: $bootfile" >&2
             echo "  This system may not be using BLS" >&2
-            return 1
+            build_failure
         fi
 
         echo "BLS entry ID: $entry_id" >&2
@@ -624,14 +688,14 @@ build_kernel() {
         if ! grub2-reboot "$entry_id" 2>&1; then
             echo "ERROR: grub2-reboot failed with BLS entry ID" >&2
             echo "  Tried: grub2-reboot \"$entry_id\"" >&2
-            return 1
+            build_failure
         fi
 
         # Verify it was set
         if ! verify_onetime_boot; then
             echo "ERROR: One-time boot verification failed" >&2
             echo "  grub2-reboot command succeeded but neither next_entry nor saved_entry was set" >&2
-            return 1
+            build_failure
         fi
 
         echo "✓ One-time boot configured (BLS ID: $entry_id)" >&2
@@ -642,13 +706,13 @@ build_kernel() {
 
         if ! grub-reboot "$kernel_version" 2>&1; then
             echo "ERROR: grub-reboot failed for kernel $kernel_version" >&2
-            return 1
+            build_failure
         fi
 
         # Verify it was set
         if ! verify_onetime_boot; then
             echo "ERROR: One-time boot verification failed" >&2
-            return 1
+            build_failure
         fi
 
         echo "✓ One-time boot configured via grub-reboot" >&2
@@ -659,7 +723,7 @@ build_kernel() {
         echo "  This system requires grub2-reboot (RHEL/Fedora) or grub-reboot (Debian/Ubuntu)" >&2
         echo "  Bisection cannot safely proceed without one-time boot support" >&2
         echo "  Install grub2-tools (RHEL) or grub-common (Debian) package" >&2
-        return 1
+        build_failure
     fi
 
     # Restore Makefile
