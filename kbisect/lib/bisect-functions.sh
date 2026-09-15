@@ -439,6 +439,8 @@ build_kernel() {
     local commit="$1"
     local kernel_path="${2:-$KERNEL_PATH}"
     local kernel_config="${3:-}"
+    local root_fstype=""
+    local required_initramfs_driver=""
 
     echo "====================================================================" >&2
     echo "Building kernel for commit: $commit" >&2
@@ -518,6 +520,25 @@ build_kernel() {
         fi
     fi
 
+    # Only add extra initramfs support when the currently running host needs
+    # it to mount /.  Most hosts need no special handling; XFS-rooted hosts
+    # require the XFS module in every bisect initramfs.
+    if command -v findmnt &> /dev/null; then
+        root_fstype=$(findmnt -n -o FSTYPE / 2>/dev/null || true)
+    fi
+    case "$root_fstype" in
+        xfs)
+            required_initramfs_driver="xfs"
+            echo "Detected XFS root filesystem; enabling conditional XFS initramfs support" >&2
+            ;;
+        "")
+            echo "Warning: Could not determine root filesystem type; skipping filesystem-specific initramfs changes" >&2
+            ;;
+        *)
+            echo "Detected root filesystem: $root_fstype; no filesystem-specific initramfs changes required" >&2
+            ;;
+    esac
+
     # Fill in missing config defaults
     make olddefconfig >&2 || {
         git restore Makefile
@@ -530,13 +551,12 @@ build_kernel() {
 
     # Disable module signing
     if [ -x "scripts/config" ]; then
-        # Root filesystems on the supported RHEL machines are commonly XFS.
-        # Keep XFS as a module and explicitly add it to each bisect initramfs
-        # below so a test kernel can mount /sysroot during early boot.
-        scripts/config --module XFS_FS || {
-            git restore Makefile
-            build_failure
-        }
+        if [ "$root_fstype" = "xfs" ]; then
+            scripts/config --module XFS_FS || {
+                git restore Makefile
+                build_failure
+            }
+        fi
         scripts/config --disable MODULE_SIG || {
             git restore Makefile
             build_failure
@@ -593,30 +613,33 @@ build_kernel() {
         build_failure
     }
 
-    # kernel-install/dracut may omit XFS from a host-only initramfs when the
-    # newly installed kernel is not currently running.  Force it in so the
-    # root filesystem remains mountable after the one-time bisect boot.
     local kernel_version
     kernel_version=$(make kernelrelease 2>/dev/null) || {
         git restore Makefile
         build_failure
     }
-    if ! command -v dracut &> /dev/null; then
-        echo "ERROR: dracut is required to build the bisect initramfs" >&2
-        git restore Makefile
-        build_failure
+    if [ -n "$required_initramfs_driver" ]; then
+        if ! command -v dracut &> /dev/null; then
+            echo "ERROR: dracut is required for $root_fstype-rooted hosts" >&2
+            git restore Makefile
+            build_failure
+        fi
+        if ! dracut --force --add-drivers "$required_initramfs_driver" \
+            "/boot/initramfs-${kernel_version}.img" "${kernel_version}" >&2; then
+            echo "ERROR: Failed to add $required_initramfs_driver support to initramfs-${kernel_version}.img" >&2
+            git restore Makefile
+            build_failure
+        fi
+        if ! lsinitrd "/boot/initramfs-${kernel_version}.img" 2>/dev/null |
+            grep -qE "(^|/)${required_initramfs_driver}\\.ko([.]|$)"; then
+            echo "ERROR: $required_initramfs_driver module is missing from initramfs-${kernel_version}.img" >&2
+            git restore Makefile
+            build_failure
+        fi
+        echo "✓ $required_initramfs_driver support confirmed in initramfs-${kernel_version}.img" >&2
+    else
+        echo "Skipping filesystem-specific initramfs driver injection" >&2
     fi
-    if ! dracut --force --add-drivers xfs "/boot/initramfs-${kernel_version}.img" "${kernel_version}" >&2; then
-        echo "ERROR: Failed to add XFS support to initramfs-${kernel_version}.img" >&2
-        git restore Makefile
-        build_failure
-    fi
-    if ! lsinitrd "/boot/initramfs-${kernel_version}.img" 2>/dev/null | grep -qE '(^|/)xfs\.ko([.]|$)'; then
-        echo "ERROR: XFS module is missing from initramfs-${kernel_version}.img" >&2
-        git restore Makefile
-        build_failure
-    fi
-    echo "✓ XFS support confirmed in initramfs-${kernel_version}.img" >&2
 
     # Update GRUB
     if command -v grub2-mkconfig &> /dev/null; then
