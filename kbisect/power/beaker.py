@@ -129,7 +129,7 @@ class BeakerController(PowerController):
         logger.info(f"✓ Power on command sent for {self.hostname}")
         return True
 
-    def power_off(self, _force: bool = False) -> bool:
+    def power_off(self, force: bool = False) -> bool:
         """Power off the system.
 
         Args:
