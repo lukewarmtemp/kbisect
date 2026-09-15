@@ -1238,6 +1238,14 @@ def cmd_build(args: argparse.Namespace) -> int:
         print("✗ Config file must have 'hosts' section")
         return 1
 
+
+def cmd_validate_endpoints(args: argparse.Namespace) -> int:
+    """Validate good and bad endpoints without changing git bisect state."""
+    config_dict = load_config(args.config)
+    config = create_bisect_config(config_dict, args)
+    bisect = BisectMaster(config, args.good_commit, args.bad_commit)
+    return 0 if bisect.validate_endpoints(args.good_commit, args.bad_commit) else 1
+
     # Create bisect config
     config = create_bisect_config(config_dict, args)
 
@@ -1384,6 +1392,13 @@ def create_parser() -> argparse.ArgumentParser:
         help="Save build logs to database (creates temporary session)",
     )
 
+    parser_validate = subparsers.add_parser(
+        "validate-endpoints",
+        help="Build, boot, and test good/bad endpoints without marking git bisect",
+    )
+    parser_validate.add_argument("good_commit", help="Expected-good kernel tag or commit")
+    parser_validate.add_argument("bad_commit", help="Expected-bad kernel tag or commit")
+
     return parser
 
 
@@ -1424,6 +1439,8 @@ def main() -> int:
             return cmd_metadata(args)
         if args.command == "build":
             return cmd_build(args)
+        if args.command == "validate-endpoints":
+            return cmd_validate_endpoints(args)
 
         parser.print_help()
         return 1

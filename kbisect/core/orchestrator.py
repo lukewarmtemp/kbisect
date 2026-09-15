@@ -2578,6 +2578,88 @@ class BisectMaster:
 
         logger.info("=" * 60 + "\n")
 
+    def validate_endpoints(self, good_commit: str, bad_commit: str) -> bool:
+        """Build, boot, and test both endpoints without marking Git bisect."""
+        logger.info("=== Validating Bisection Endpoints ===")
+
+        missing_hosts = []
+        for host_manager in self.host_managers:
+            ret, _stdout, _stderr = host_manager.ssh.run_command(
+                f"test -d {shlex.quote(host_manager.config.kernel_path)}/.git",
+                timeout=host_manager.ssh_connect_timeout,
+            )
+            if ret != 0:
+                missing_hosts.append(host_manager.config.hostname)
+        if missing_hosts:
+            logger.info("Kernel repositories are missing; deploying them before validation")
+            if not self._auto_initialize_hosts():
+                logger.error("Failed to deploy kernel repositories for endpoint validation")
+                return False
+
+        endpoint_results = []
+        for endpoint_name, endpoint in (("good", good_commit), ("bad", bad_commit)):
+            commit_sha = self._resolve_commit_sha(endpoint)
+            if not commit_sha:
+                logger.error(f"Unable to resolve {endpoint_name} endpoint: {endpoint}")
+                return False
+
+            first_host = self.host_managers[0]
+            ret, message, _stderr = first_host.ssh.run_command(
+                f"cd {shlex.quote(first_host.config.kernel_path)} && git log -1 --oneline {shlex.quote(commit_sha)}",
+                timeout=first_host.ssh_connect_timeout,
+            )
+            commit_message = message.strip() if ret == 0 else endpoint
+            iteration_id = self.state.create_iteration(
+                self.session_id, len(endpoint_results) + 1, commit_sha, commit_message,
+            )
+            logger.info(f"--- Testing {endpoint_name} endpoint {endpoint} ({commit_sha[:7]}) ---")
+
+            build_results = {}
+            for host_manager in self.host_managers:
+                success, exit_code, _log_id, kernel_ver = self._build_on_host(
+                    host_manager, commit_sha, iteration_id)
+                build_results[host_manager.host_id] = {
+                    "success": success, "exit_code": exit_code, "kernel_ver": kernel_ver,
+                }
+            if not all(result["success"] for result in build_results.values()):
+                logger.error(f"{endpoint_name.capitalize()} endpoint build failed")
+                return False
+
+            reboot_results = []
+            for host_manager in self.host_managers:
+                success, _actual_kernel, error = self._reboot_host(
+                    host_manager, iteration_id,
+                    build_results[host_manager.host_id].get("kernel_ver"),
+                )
+                reboot_results.append(success)
+                if not success:
+                    logger.error(f"{endpoint_name.capitalize()} endpoint reboot failed on {host_manager.config.hostname}: {error}")
+            if not all(reboot_results):
+                return False
+
+            test_results = []
+            for host_manager in self.host_managers:
+                result, _output = self._test_on_host(host_manager, iteration_id)
+                test_results.append(result)
+            passed = all(result == TestResult.GOOD for result in test_results)
+            endpoint_results.append(passed)
+            self.state.update_iteration(
+                iteration_id,
+                final_result=TestResult.GOOD.value if passed else TestResult.BAD.value,
+                end_time=datetime.now(timezone.utc).isoformat(),
+            )
+            logger.info(f"{endpoint_name.capitalize()} endpoint: {'PASS' if passed else 'FAIL'} (not marked in git bisect)")
+
+        if endpoint_results == [True, False]:
+            logger.info("✓ Endpoint validation passed: good=PASS, bad=FAIL")
+            return True
+        logger.error(
+            "Endpoint validation failed: expected good=PASS and bad=FAIL; "
+            f"got good={'PASS' if endpoint_results[0] else 'FAIL'}, "
+            f"bad={'PASS' if endpoint_results[1] else 'FAIL'}"
+        )
+        return False
+
     def build_only(self, commit_sha: str, save_logs: bool = False) -> bool:
         """Build kernel on all hosts without rebooting or testing.
 
