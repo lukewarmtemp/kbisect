@@ -893,59 +893,8 @@ class BisectMaster:
                 return False
             logger.info(f"  ✓ {hm.config.hostname}")
 
-        # Transfer test scripts if they're local files
-        if self._local_test_scripts:
-            logger.info("Transferring test scripts to hosts...")
-            for hm in self.host_managers:
-                if hm.host_id in self._local_test_scripts:
-                    script_info = self._local_test_scripts[hm.host_id]
-                    local_path = script_info["local_path"]
-                    remote_path = script_info["remote_path"]
-                    remote_dir = script_info["remote_dir"]
-
-                    # Create remote directory
-                    ret, _stdout, stderr = hm.ssh.run_command(f"mkdir -p {shlex.quote(remote_dir)}", timeout=hm.ssh_connect_timeout)
-                    if ret != 0:
-                        logger.error(f"Failed to create test script directory on {hm.config.hostname}: {stderr}")
-                        return False
-
-                    # Transfer script using SCP via subprocess
-                    try:
-                        scp_cmd = [
-                            "scp",
-                            "-o",
-                            "StrictHostKeyChecking=no",
-                            "-o",
-                            f"ConnectTimeout={hm.ssh_connect_timeout}",
-                            local_path,
-                            f"{hm.config.ssh_user}@{hm.config.hostname}:{remote_path}",
-                        ]
-                        result = subprocess.run(
-                            scp_cmd,
-                            capture_output=True,
-                            text=True,
-                            timeout=hm.ssh_connect_timeout,
-                            check=False,
-                        )
-
-                        if result.returncode != 0:
-                            logger.error(f"Failed to transfer test script to {hm.config.hostname}: {result.stderr}")
-                            return False
-
-                        # Make script executable
-                        ret, _stdout, stderr = hm.ssh.run_command(f"chmod +x {shlex.quote(remote_path)}", timeout=hm.ssh_connect_timeout)
-                        if ret != 0:
-                            logger.error(f"Failed to make test script executable on {hm.config.hostname}: {stderr}")
-                            return False
-
-                        logger.info(f"  ✓ Transferred test script to {hm.config.hostname}: {remote_path}")
-
-                    except subprocess.TimeoutExpired:
-                        logger.error(f"Test script transfer to {hm.config.hostname} timed out")
-                        return False
-                    except Exception as exc:
-                        logger.error(f"Error transferring test script to {hm.config.hostname}: {exc}")
-                        return False
+        if not self._transfer_local_test_scripts():
+            return False
 
         # Transfer kernel configs if they're local files
         if self._local_kernel_configs:
@@ -2578,9 +2527,68 @@ class BisectMaster:
 
         logger.info("=" * 60 + "\n")
 
+    def _transfer_local_test_scripts(self) -> bool:
+        """Transfer local reproducer scripts to their configured hosts."""
+        if not self._local_test_scripts:
+            return True
+
+        logger.info("Transferring test scripts to hosts...")
+        for hm in self.host_managers:
+            if hm.host_id not in self._local_test_scripts:
+                continue
+
+            script_info = self._local_test_scripts[hm.host_id]
+            local_path = script_info["local_path"]
+            remote_path = script_info["remote_path"]
+            remote_dir = script_info["remote_dir"]
+
+            ret, _stdout, stderr = hm.ssh.run_command(
+                f"mkdir -p {shlex.quote(remote_dir)}", timeout=hm.ssh_connect_timeout,
+            )
+            if ret != 0:
+                logger.error(f"Failed to create test script directory on {hm.config.hostname}: {stderr}")
+                return False
+
+            try:
+                scp_cmd = [
+                    "scp", "-o", "StrictHostKeyChecking=no", "-o",
+                    f"ConnectTimeout={hm.ssh_connect_timeout}", local_path,
+                    f"{hm.config.ssh_user}@{hm.config.hostname}:{remote_path}",
+                ]
+                result = subprocess.run(
+                    scp_cmd, capture_output=True, text=True,
+                    timeout=hm.ssh_connect_timeout, check=False,
+                )
+                if result.returncode != 0:
+                    logger.error(f"Failed to transfer test script to {hm.config.hostname}: {result.stderr}")
+                    return False
+
+                ret, _stdout, stderr = hm.ssh.run_command(
+                    f"chmod +x {shlex.quote(remote_path)}", timeout=hm.ssh_connect_timeout,
+                )
+                if ret != 0:
+                    logger.error(f"Failed to make test script executable on {hm.config.hostname}: {stderr}")
+                    return False
+                logger.info(f"  ✓ Transferred test script to {hm.config.hostname}: {remote_path}")
+            except subprocess.TimeoutExpired:
+                logger.error(f"Test script transfer to {hm.config.hostname} timed out")
+                return False
+            except Exception as exc:
+                logger.error(f"Error transferring test script to {hm.config.hostname}: {exc}")
+                return False
+        return True
+
     def validate_endpoints(self, good_commit: str, bad_commit: str) -> bool:
         """Build, boot, and test both endpoints without marking Git bisect."""
         logger.info("=== Validating Bisection Endpoints ===")
+        metric_mode = self.config.metric_direction in ("higher", "lower")
+        endpoint_metrics = {"good": {}, "bad": {}}
+
+        # The local reproducer may have changed since initial deployment.
+        # Refresh it before testing so endpoint results use the current script.
+        if not self._transfer_local_test_scripts():
+            logger.error("Failed to refresh local test scripts for endpoint validation")
+            return False
 
         missing_hosts = []
         for host_manager in self.host_managers:
@@ -2641,6 +2649,14 @@ class BisectMaster:
             for host_manager in self.host_managers:
                 result, _output = self._test_on_host(host_manager, iteration_id)
                 test_results.append(result)
+                if metric_mode:
+                    import re
+                    matches = re.findall(
+                        r"KBISect metric:\s*([0-9]+(?:\.[0-9]+)?)",
+                        _output,
+                    )
+                    if matches:
+                        endpoint_metrics[endpoint_name][host_manager.host_id] = float(matches[-1])
             passed = all(result == TestResult.GOOD for result in test_results)
             endpoint_results.append(passed)
             self.state.update_iteration(
@@ -2649,6 +2665,63 @@ class BisectMaster:
                 end_time=datetime.now(timezone.utc).isoformat(),
             )
             logger.info(f"{endpoint_name.capitalize()} endpoint: {'PASS' if passed else 'FAIL'} (not marked in git bisect)")
+
+        if metric_mode:
+            missing = []
+            thresholds = {}
+            for host_manager in self.host_managers:
+                good_value = endpoint_metrics["good"].get(host_manager.host_id)
+                bad_value = endpoint_metrics["bad"].get(host_manager.host_id)
+                if good_value is None or bad_value is None:
+                    missing.append(host_manager.config.hostname)
+                    continue
+                dropped = (bad_value < good_value if self.config.metric_direction == "higher"
+                           else bad_value > good_value)
+                logger.info(
+                    f"  [{host_manager.config.hostname}] Endpoint metrics: "
+                    f"good={good_value:.3f}, bad={bad_value:.3f}, "
+                    f"direction={self.config.metric_direction}"
+                )
+                if not dropped:
+                    logger.error(
+                        f"  [{host_manager.config.hostname}] No expected metric drop "
+                        f"between endpoints"
+                    )
+                    return False
+                thresholds[host_manager.host_id] = (good_value + bad_value) / 2.0
+
+            if missing:
+                logger.error(
+                    "Metric validation could not find KBISect metric output on: "
+                    + ", ".join(missing)
+                )
+                return False
+
+            threshold_file = self.config.metric_threshold_file
+            if not threshold_file:
+                logger.error("Metric validation requires test.metric_threshold_file")
+                return False
+            for host_manager in self.host_managers:
+                threshold = thresholds[host_manager.host_id]
+                command = (
+                    f"mkdir -p $(dirname {shlex.quote(threshold_file)}) && "
+                    f"printf '%s\\n' {threshold:.12g} > {shlex.quote(threshold_file)}"
+                )
+                ret, _stdout, stderr = host_manager.ssh.run_command(
+                    command, timeout=host_manager.ssh_connect_timeout,
+                )
+                if ret != 0:
+                    logger.error(
+                        f"Failed to write metric threshold on {host_manager.config.hostname}: "
+                        f"{stderr.strip()}"
+                    )
+                    return False
+                logger.info(
+                    f"  [{host_manager.config.hostname}] Wrote calibrated threshold "
+                    f"{threshold:.3f} to {threshold_file}"
+                )
+            logger.info("✓ Endpoint validation passed: expected metric drop confirmed")
+            return True
 
         if endpoint_results == [True, False]:
             logger.info("✓ Endpoint validation passed: good=PASS, bad=FAIL")
