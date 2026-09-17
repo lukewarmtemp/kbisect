@@ -1723,7 +1723,12 @@ class BisectMaster:
         logger.info(f"  [{hostname}] Host recovered successfully - SSH is responsive")
         return True
 
-    def _test_on_host(self, host_manager: HostManager, iteration_id: int) -> Tuple[TestResult, str]:
+    def _test_on_host(
+        self,
+        host_manager: HostManager,
+        iteration_id: int,
+        endpoint_probe: bool = False,
+    ) -> Tuple[TestResult, str]:
         """Run test on a specific host using its configured test script.
 
         Args:
@@ -1735,12 +1740,13 @@ class BisectMaster:
         """
         hostname = host_manager.config.hostname
         test_script = host_manager.config.test_script
-        logger.info(f"  [{hostname}] Running test: {test_script}...")
+        mode = " (endpoint probe)" if endpoint_probe else ""
+        logger.info(f"  [{hostname}] Running test: {test_script}{mode}...")
 
         # Create initial log entry with header
         log_header = f"=== Test Execution on {hostname} ===\n"
         log_header += f"Test type: {self.config.test_type}\n"
-        log_header += f"Test script: {test_script}\n"
+        log_header += f"Test script: {test_script}{mode}\n"
         log_header += f"Timeout: {host_manager.test_timeout}s\n\n"
         log_header += "=== TEST OUTPUT ===\n"
 
@@ -1774,6 +1780,7 @@ class BisectMaster:
             "run_test",
             self.config.test_type,
             test_script,
+            "1" if endpoint_probe else "0",
             timeout=host_manager.test_timeout,
             chunk_callback=stream_callback,
         )
@@ -2579,7 +2586,7 @@ class BisectMaster:
         return True
 
     def validate_endpoints(self, good_commit: str, bad_commit: str) -> bool:
-        """Build, boot, and test both endpoints without marking Git bisect."""
+        """Measure both endpoints and compare the observed drop with the report."""
         logger.info("=== Validating Bisection Endpoints ===")
         metric_mode = self.config.metric_direction in ("higher", "lower")
         endpoint_metrics = {"good": {}, "bad": {}}
@@ -2647,7 +2654,9 @@ class BisectMaster:
 
             test_results = []
             for host_manager in self.host_managers:
-                result, _output = self._test_on_host(host_manager, iteration_id)
+                result, _output = self._test_on_host(
+                    host_manager, iteration_id, endpoint_probe=metric_mode,
+                )
                 test_results.append(result)
                 if metric_mode:
                     import re
@@ -2669,25 +2678,53 @@ class BisectMaster:
         if metric_mode:
             missing = []
             thresholds = {}
+            expected_drop = self.config.expected_drop_pct
+            if expected_drop is None:
+                logger.error(
+                    "Metric endpoint validation requires test.expected_drop_pct "
+                    "from the timeline analyzer"
+                )
+                return False
+
+            if expected_drop < 0:
+                expected_drop = abs(expected_drop)
+
             for host_manager in self.host_managers:
                 good_value = endpoint_metrics["good"].get(host_manager.host_id)
                 bad_value = endpoint_metrics["bad"].get(host_manager.host_id)
                 if good_value is None or bad_value is None:
                     missing.append(host_manager.config.hostname)
                     continue
-                dropped = (bad_value < good_value if self.config.metric_direction == "higher"
-                           else bad_value > good_value)
+                if self.config.metric_direction == "higher":
+                    fresh_drop = ((good_value - bad_value) / good_value) * 100.0
+                else:
+                    fresh_drop = ((bad_value - good_value) / good_value) * 100.0
                 logger.info(
                     f"  [{host_manager.config.hostname}] Endpoint metrics: "
                     f"good={good_value:.3f}, bad={bad_value:.3f}, "
-                    f"direction={self.config.metric_direction}"
+                    f"direction={self.config.metric_direction}, "
+                    f"analyzer_drop={expected_drop:.3f}%, "
+                    f"fresh_drop={fresh_drop:.3f}%"
                 )
-                if not dropped:
+                if fresh_drop <= 0:
                     logger.error(
-                        f"  [{host_manager.config.hostname}] No expected metric drop "
-                        f"between endpoints"
+                        f"  [{host_manager.config.hostname}] Endpoint measurements do not "
+                        f"show a regression in the expected direction"
                     )
                     return False
+                delta = abs(fresh_drop - expected_drop)
+                if delta > self.config.comparison_tolerance_pct:
+                    logger.error(
+                        f"  [{host_manager.config.hostname}] Endpoint drop is not "
+                        f"comparable to the timeline: analyzer={expected_drop:.3f}%, "
+                        f"fresh={fresh_drop:.3f}%, delta={delta:.3f} percentage points, "
+                        f"tolerance={self.config.comparison_tolerance_pct:.3f}"
+                    )
+                    return False
+                logger.info(
+                    f"  [{host_manager.config.hostname}] Endpoint comparison: "
+                    f"comparable (delta={delta:.3f} percentage points)"
+                )
                 thresholds[host_manager.host_id] = (good_value + bad_value) / 2.0
 
             if missing:

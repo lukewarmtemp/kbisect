@@ -100,3 +100,7 @@ class BisectConfig:
     # Kernel repository (optional automatic deployment)
     kernel_repo_source: Optional[str] = None
     kernel_repo_branch: Optional[str] = None
+    metric_direction: Optional[str] = None
+    metric_threshold_file: Optional[str] = None
+    expected_drop_pct: Optional[float] = None
+    comparison_tolerance_pct: float = 5.0

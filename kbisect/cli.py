@@ -168,6 +168,12 @@ def create_bisect_config(config_dict: Dict[str, Any], _args: Any) -> BisectConfi
         console_collector_type=console_logs_config.get("collector", "auto"),
         kernel_repo_source=config_dict.get("kernel_repo", {}).get("source"),
         kernel_repo_branch=config_dict.get("kernel_repo", {}).get("branch"),
+        metric_direction=config_dict.get("test", {}).get("metric_direction"),
+        metric_threshold_file=config_dict.get("test", {}).get("metric_threshold_file"),
+        expected_drop_pct=config_dict.get("test", {}).get("expected_drop_pct"),
+        comparison_tolerance_pct=float(
+            config_dict.get("test", {}).get("comparison_tolerance_pct", 5.0)
+        ),
     )
 
 

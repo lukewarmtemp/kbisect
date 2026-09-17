@@ -1066,13 +1066,14 @@ EOF
 run_test() {
     local test_type="${1:-boot}"
     local test_arg="${2:-}"
+    local endpoint_probe="${3:-0}"
 
     case "$test_type" in
         boot)
             test_boot_success
             ;;
         custom)
-            test_custom_script "$test_arg"
+            test_custom_script "$test_arg" "$endpoint_probe"
             ;;
         *)
             echo "Unknown test type: $test_type" >&2
@@ -1109,6 +1110,7 @@ test_boot_success() {
 
 test_custom_script() {
     local script_path="$1"
+    local endpoint_probe="${2:-0}"
 
     if [ ! -f "$script_path" ]; then
         echo "Test script not found: $script_path" >&2
@@ -1123,7 +1125,11 @@ test_custom_script() {
     fi
 
     echo "Running custom test: $script_path" >&2
-    "$script_path"
+    if [ "$endpoint_probe" = "1" ]; then
+        KBISect_ENDPOINT_PROBE=1 "$script_path"
+    else
+        "$script_path"
+    fi
 }
 
 # ============================================================================
