@@ -25,6 +25,7 @@ if TYPE_CHECKING:
 
 from kbisect.collectors import create_console_collector
 from kbisect.config.config import BisectConfig, HostConfig
+from kbisect.deployment import SlaveDeployer
 from kbisect.power.base import BootDevice
 from kbisect.remote import SSHClient
 
@@ -2591,6 +2592,14 @@ class BisectMaster:
         metric_mode = self.config.metric_direction in ("higher", "lower")
         endpoint_metrics = {"good": {}, "bad": {}}
 
+        # Endpoint validation builds kernels directly.  Do the same host
+        # preparation that `init` performs instead of assuming that a prior
+        # kernel-repository deployment also installed the slave library and
+        # build dependencies.
+        if not self._ensure_validation_hosts_ready():
+            logger.error("Endpoint validation cannot continue: host preparation failed")
+            return False
+
         # The local reproducer may have changed since initial deployment.
         # Refresh it before testing so endpoint results use the current script.
         if not self._transfer_local_test_scripts():
@@ -3009,6 +3018,42 @@ class BisectMaster:
         else:
             print("✓ Build dependencies installed on all hosts\n")
 
+        return True
+
+    def _ensure_validation_hosts_ready(self) -> bool:
+        """Ensure the slave runtime and kernel build dependencies are ready.
+
+        Kernel-source deployment and slave deployment are independent.  A
+        host can therefore have `/root/kernel` while still lacking
+        `bisect-functions.sh`, or have an incomplete set of development
+        headers.  Validate both conditions before spending time building an
+        endpoint kernel.
+        """
+        for host_manager in self.host_managers:
+            host = host_manager.config.hostname
+            deployer = SlaveDeployer(
+                host,
+                host_manager.config.ssh_user,
+                host_manager.config.bisect_path,
+                connect_timeout=host_manager.ssh_connect_timeout,
+            )
+            if not deployer.is_deployed():
+                logger.info("Slave deployment missing on %s; deploying it before validation", host)
+                if not deployer.deploy_full():
+                    logger.error("Slave deployment failed on %s", host)
+                    return False
+            elif not deployer.update_library():
+                logger.error("Failed to refresh the slave library on %s", host)
+                return False
+
+            logger.info("Checking kernel build dependencies on %s", host)
+            ret, _stdout, stderr = host_manager.ssh.call_function(
+                "install_build_deps", timeout=max(300, host_manager.ssh_connect_timeout),
+            )
+            if ret != 0:
+                logger.error("Build dependency installation failed on %s: %s", host, stderr.strip())
+                return False
+            logger.info("Build dependencies ready on %s", host)
         return True
 
     def _extract_git_error(self, stderr: str) -> str:

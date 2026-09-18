@@ -338,6 +338,7 @@ install_build_deps() {
                 openssl-devel \
                 bc \
                 ncurses-devel \
+                libuuid-devel \
                 perl \
                 zstd \
                 dwarves \
@@ -366,6 +367,7 @@ install_build_deps() {
                 libssl-dev \
                 bc \
                 libncurses-dev \
+                uuid-dev \
                 zstd \
                 dwarves \
                 >&2 2>&1
@@ -382,7 +384,7 @@ install_build_deps() {
             ;;
     esac
 
-    # Verify critical tools are available
+    # Verify critical tools and headers are available
     local missing_tools=""
     for tool in flex bison gcc make zstd; do
         if ! command -v $tool &> /dev/null; then
@@ -392,6 +394,21 @@ install_build_deps() {
 
     if [ -n "$missing_tools" ]; then
         echo "Error: Critical build tools still missing:$missing_tools" >&2
+        return 1
+    fi
+
+    local missing_headers=""
+    for header in \
+        /usr/include/uuid/uuid.h \
+        /usr/include/elf.h \
+        /usr/include/openssl/opensslv.h; do
+        if [ ! -r "$header" ]; then
+            missing_headers="$missing_headers $header"
+        fi
+    done
+
+    if [ -n "$missing_headers" ]; then
+        echo "Error: Required kernel build headers still missing:$missing_headers" >&2
         return 1
     fi
 
